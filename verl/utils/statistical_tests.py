@@ -44,7 +44,6 @@ import numpy as np
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Tuple, Union
 from enum import Enum
-import warnings
 
 
 class StatTestType(Enum):
@@ -884,7 +883,6 @@ def _incomplete_beta(a: float, b: float, x: float) -> float:
 def _rankdata(x: np.ndarray) -> np.ndarray:
     """Assign ranks to data, handling ties with average."""
     sorter = np.argsort(x)
-    x_sorted = x[sorter]
 
     ranks = np.empty_like(sorter, dtype=float)
     ranks[sorter] = np.arange(1, len(x) + 1, dtype=float)
@@ -929,10 +927,6 @@ def _shapiro_wilk_approx(data: np.ndarray) -> Tuple[float, float]:
 
     # Sort data
     x_sorted = np.sort(data)
-    x_mean = np.mean(data)
-
-    # Calculate W statistic approximation
-    ss = np.sum((data - x_mean) ** 2)
 
     # Simplified calculation
     m = np.arange(1, n + 1)

@@ -37,7 +37,6 @@ Usage:
 
 import argparse
 import json
-import os
 import subprocess
 import sys
 import yaml
@@ -46,7 +45,6 @@ from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Optional, Any
 from dataclasses import dataclass, field
-import shutil
 
 # Add project root to path
 PROJECT_ROOT = Path(__file__).parent.parent
@@ -393,7 +391,7 @@ class AblationRunner:
 
         # Try to compute statistical significance
         try:
-            from verl.utils.statistical_tests import StatisticalReport, multiple_comparison_correction
+            from verl.utils.statistical_tests import StatisticalReport
 
             # Find baseline
             baseline_name = 'baseline' if 'baseline' in self.results else list(self.results.keys())[0]

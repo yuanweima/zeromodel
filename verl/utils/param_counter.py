@@ -22,7 +22,6 @@ This module provides tools to:
 
 from dataclasses import dataclass
 from typing import Dict, Optional, Tuple
-import math
 
 
 @dataclass

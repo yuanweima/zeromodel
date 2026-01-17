@@ -1,0 +1,93 @@
+name: ablation-tools
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - "verl/utils/param_counter.py"
+      - "verl/utils/statistical_tests.py"
+      - "verl/utils/evaluation_metrics.py"
+      - "scripts/run_ablation.py"
+      - "tests/test_param_counter.py"
+      - "tests/test_statistical_tests.py"
+      - "tests/test_evaluation_metrics.py"
+      - ".github/workflows/ablation_tools.yml"
+  pull_request:
+    branches:
+      - main
+    paths:
+      - "verl/utils/param_counter.py"
+      - "verl/utils/statistical_tests.py"
+      - "verl/utils/evaluation_metrics.py"
+      - "scripts/run_ablation.py"
+      - "tests/test_param_counter.py"
+      - "tests/test_statistical_tests.py"
+      - "tests/test_evaluation_metrics.py"
+      - ".github/workflows/ablation_tools.yml"
+
+jobs:
+  test-ablation-tools:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ["3.9", "3.10", "3.11"]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install numpy pytest pyyaml
+
+      - name: Run param_counter tests
+        run: |
+          python -m pytest tests/test_param_counter.py -v
+
+      - name: Run statistical_tests tests
+        run: |
+          python -m pytest tests/test_statistical_tests.py -v
+
+      - name: Run evaluation_metrics tests
+        run: |
+          python -m pytest tests/test_evaluation_metrics.py -v
+
+      - name: Verify param_counter module runs
+        run: |
+          python verl/utils/param_counter.py
+
+      - name: Verify statistical_tests module runs
+        run: |
+          python verl/utils/statistical_tests.py
+
+      - name: Verify evaluation_metrics module runs
+        run: |
+          python verl/utils/evaluation_metrics.py
+
+      - name: Verify ablation runner dry-run
+        run: |
+          python scripts/run_ablation.py --dry-run --experiments baseline mla_only
+
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+
+      - name: Install linting tools
+        run: |
+          pip install flake8
+
+      - name: Lint ablation tools
+        run: |
+          flake8 verl/utils/param_counter.py verl/utils/statistical_tests.py verl/utils/evaluation_metrics.py scripts/run_ablation.py --max-line-length=120 --ignore=E501,W503,W504,E203,E226,E741,F541
