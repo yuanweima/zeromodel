@@ -83,17 +83,24 @@ zeromodel/
 │   │   │   ├── losses.py               # 损失函数
 │   │   │   └── halting.py              # 停机单元
 │   │   └── config/
-│   │       └── lru_trainer.yaml        # 训练配置
+│   │       └── lru_trainer.yaml        # 训练配置 (含17个消融实验)
 │   └── utils/
+│       ├── param_counter.py            # 参数计数工具
+│       ├── statistical_tests.py        # 统计显著性检验
+│       ├── evaluation_metrics.py       # 评估指标体系
 │       └── reward_score/
 │           └── causal_loop.py          # 因果环路奖励函数
 ├── examples/
 │   └── data_preprocess/
 │       └── causal_loop.py              # 因果环路数据生成
 ├── scripts/
-│   └── train_lru.sh                    # 训练脚本
+│   ├── train_lru.sh                    # 训练脚本
+│   └── run_ablation.py                 # 自动化消融实验脚本
 └── tests/
-    └── test_mla_lru.py                 # 测试套件
+    ├── test_mla_lru.py                 # MLA+LRU 测试
+    ├── test_param_counter.py           # 参数计数测试
+    ├── test_statistical_tests.py       # 统计检验测试
+    └── test_evaluation_metrics.py      # 评估指标测试
 ```
 
 ## 因果环路任务
@@ -237,6 +244,297 @@ outputs = model(input_ids, labels=labels)
 - **Few-shot 效率**: 示范数量与性能的关系
 - **平均迭代次数 vs 问题复杂度**: 验证自适应计算
 - **收敛比**: 最后/首次残差，验证推理收敛性
+
+## 消融实验工具
+
+本项目提供完整的消融实验工具链，包括参数计数、统计检验、评估指标和自动化实验脚本。
+
+### 项目结构（工具部分）
+
+```
+verl/utils/
+├── param_counter.py        # 参数计数工具
+├── statistical_tests.py    # 统计显著性检验
+└── evaluation_metrics.py   # 评估指标体系
+
+scripts/
+└── run_ablation.py         # 自动化消融实验脚本
+
+tests/
+├── test_param_counter.py       # 参数计数测试 (16 tests)
+├── test_statistical_tests.py   # 统计检验测试 (32 tests)
+└── test_evaluation_metrics.py  # 评估指标测试 (18 tests)
+```
+
+### 1. 参数计数工具
+
+用于计算不同模型配置的参数量，确保消融实验的公平对比。
+
+```python
+from verl.utils.param_counter import (
+    count_standard_transformer_params,
+    count_mla_params,
+    count_mla_lru_params,
+    design_matched_baseline,
+    compare_configurations,
+)
+
+# 计算标准 Transformer 参数量
+baseline = count_standard_transformer_params(
+    vocab_size=151936,
+    hidden_size=896,
+    intermediate_size=4864,
+    num_layers=24,
+    num_attention_heads=14,
+    num_kv_heads=2,
+)
+print(f"Baseline: {baseline.total:,} params")
+
+# 计算 MLA + LRU 参数量
+mla_lru = count_mla_lru_params(
+    vocab_size=151936,
+    hidden_size=896,
+    intermediate_size=4864,
+    num_layers=24,
+    num_attention_heads=14,
+    num_kv_heads=2,
+    kv_latent_dim=256,
+    q_latent_dim=512,
+    rope_head_dim=64,
+)
+print(f"MLA+LRU: {mla_lru.total:,} params")
+
+# 设计参数匹配的 baseline
+target_params = mla_lru.total
+intermediate_size, matched = design_matched_baseline(
+    target_params=target_params,
+    vocab_size=151936,
+    hidden_size=896,
+    num_layers=24,
+    num_attention_heads=14,
+    num_kv_heads=2,
+)
+print(f"Matched baseline (intermediate_size={intermediate_size}): {matched.total:,} params")
+
+# 生成对比表格
+configs = {
+    "baseline": baseline,
+    "mla_lru": mla_lru,
+    "matched": matched,
+}
+print(compare_configurations(configs, reference="mla_lru"))
+```
+
+命令行快速使用：
+
+```bash
+python verl/utils/param_counter.py
+```
+
+### 2. 统计显著性检验
+
+提供严格的统计检验工具，支持多种检验方法和多重比较校正。
+
+```python
+from verl.utils.statistical_tests import (
+    paired_comparison,
+    bootstrap_ci,
+    multiple_comparison_correction,
+    StatisticalReport,
+    power_analysis,
+)
+import numpy as np
+
+# 假设有两组实验结果
+baseline_scores = np.array([0.72, 0.75, 0.71, 0.73, 0.74])  # 5 seeds
+mla_lru_scores = np.array([0.81, 0.83, 0.79, 0.82, 0.80])
+
+# 配对统计检验（自动选择合适的检验方法）
+result = paired_comparison(baseline_scores, mla_lru_scores, test_type="auto")
+print(f"P-value: {result.p_value:.6f}")
+print(f"Effect size (Cohen's d): {result.effect_size:.3f}")
+print(f"Significant: {result.significant}")
+
+# Bootstrap 置信区间
+ci = bootstrap_ci(mla_lru_scores, confidence_level=0.95)
+print(f"95% CI: [{ci.lower:.4f}, {ci.upper:.4f}]")
+
+# 多重比较校正（多个实验对比时使用）
+p_values = [0.01, 0.03, 0.04, 0.08]
+adjusted_p, significant = multiple_comparison_correction(
+    p_values, method="holm", alpha=0.05
+)
+print(f"Adjusted p-values: {adjusted_p}")
+print(f"Significant: {significant}")
+
+# 生成完整统计报告
+report = StatisticalReport(baseline_scores, baseline_name="baseline")
+report.add_comparison("mla_lru", mla_lru_scores)
+print(report.generate())
+
+# 生成 LaTeX 表格
+print(report.to_latex())
+
+# Power analysis：计算所需样本量
+power = power_analysis(effect_size=0.5, alpha=0.05, power=0.8)
+print(f"Required sample size: {power['required_n']}")
+```
+
+支持的统计检验方法：
+- **Paired t-test**: 正态分布数据
+- **Wilcoxon signed-rank test**: 非参数检验
+- **Permutation test**: 小样本或非正态数据
+- **Bootstrap CI**: BCa、percentile、basic 方法
+
+支持的多重比较校正：
+- **Bonferroni**: 最保守
+- **Holm**: 比 Bonferroni 更有 power
+- **Benjamini-Hochberg**: FDR 控制
+
+### 3. 评估指标体系
+
+提供全面的评估指标收集和分析工具。
+
+```python
+from verl.utils.evaluation_metrics import (
+    MetricsCollector,
+    EvaluationReport,
+    compute_difficulty_curve,
+    compare_experiments,
+)
+
+# 创建指标收集器
+collector = MetricsCollector(max_iterations=8)
+
+# 在评估循环中添加样本
+for batch in eval_dataloader:
+    outputs = model(batch)
+
+    collector.add_batch(
+        predictions=outputs.predictions,
+        targets=batch.targets,
+        correct=outputs.correct,
+        metadata=[{
+            'level': m['level'],
+            'num_vars': m['num_vars'],
+            'num_steps': m['num_steps'],
+        } for m in batch.metadata],
+        lru_outputs=[{
+            'avg_iterations': o.avg_iterations,
+            'converged': o.converged,
+        } for o in outputs.lru_outputs],
+    )
+
+# 计算所有指标
+accuracy = collector.compute_accuracy_metrics()
+lru = collector.compute_lru_metrics()
+efficiency = collector.compute_efficiency_metrics()
+
+# 生成评估报告
+report = EvaluationReport(
+    experiment_name="mla_lru_adaptive",
+    accuracy=accuracy,
+    lru=lru,
+    efficiency=efficiency,
+)
+print(report)
+
+# 保存为 JSON
+report.to_json("results/eval_report.json")
+
+# 分析难度曲线
+curve = compute_difficulty_curve(accuracy.accuracy_by_level)
+print(f"Accuracy slope: {curve['slope']:.4f} (per level)")
+print(f"Difficulty resilience: {curve['difficulty_resilience']:.4f}")
+```
+
+指标类别：
+
+| 类别 | 指标 | 说明 |
+|------|------|------|
+| **准确率** | overall_accuracy | 总体准确率 |
+| | accuracy_by_level | 按难度级别分解 |
+| | accuracy_by_num_vars | 按变量数分解 |
+| | accuracy_by_num_steps | 按步数分解 |
+| **LRU 行为** | avg_iterations | 平均迭代次数 |
+| | convergence_ratio | 提前收敛比例 |
+| | early_halt_ratio | 早停比例 (≤2 iter) |
+| | ponder_cost | 归一化计算代价 |
+| **效率** | flops_reduction | 相对固定迭代的 FLOPs 减少 |
+| | speedup_vs_fixed | 加速比 |
+| | kv_compression_ratio | KV 缓存压缩率 |
+
+### 4. 自动化消融实验
+
+一键运行完整消融实验并生成报告。
+
+```bash
+# 查看所有可用实验配置
+python scripts/run_ablation.py --dry-run
+
+# 运行所有实验（每个配置 3 seeds）
+python scripts/run_ablation.py \
+    --config verl/trainer/config/lru_trainer.yaml \
+    --output-dir outputs/ablation \
+    --seeds 42 123 456
+
+# 只运行特定实验
+python scripts/run_ablation.py \
+    --experiments baseline mla_only mla_lru_adaptive \
+    --seeds 42 123 456
+
+# 从已有结果生成报告
+python scripts/run_ablation.py \
+    --report-only \
+    --results-dir outputs/ablation
+
+# 生成 LaTeX 表格
+python scripts/run_ablation.py \
+    --report-only \
+    --results-dir outputs/ablation \
+    --latex
+```
+
+### 5. 预定义实验配置
+
+`verl/trainer/config/lru_trainer.yaml` 包含 17 个预定义实验：
+
+| 类别 | 实验名 | 说明 |
+|------|--------|------|
+| **Baselines** | `baseline` | 原始 Qwen-0.5B (630M) |
+| | `baseline_matched` | 参数匹配 baseline (646M) |
+| **架构** | `mla_only` | 仅 MLA，无 LRU |
+| | `mla_lru_fixed` | MLA + LRU 固定迭代 |
+| | `mla_lru_adaptive` | MLA + LRU 自适应停机 (**主实验**) |
+| **LRU 组件** | `mla_lru_no_pos_mix` | 无位置混合 |
+| | `mla_lru_no_global_halt` | 无全局停机 |
+| | `mla_lru_minimal` | 最小 LRU |
+| **迭代次数** | `mla_lru_iter_2/4/8/16` | 固定 2/4/8/16 次迭代 |
+| **损失权重** | `mla_lru_no_stability` | 无稳定性损失 |
+| | `mla_lru_high_stability` | 高稳定性权重 (0.5) |
+| | `mla_lru_no_ponder` | 无 ponder 损失 |
+| | `mla_lru_high_ponder` | 高 ponder 权重 (0.01) |
+| | `mla_lru_ce_only` | 仅交叉熵损失 |
+
+### 6. 运行测试
+
+```bash
+# 运行所有工具测试
+python -m pytest tests/test_param_counter.py tests/test_statistical_tests.py tests/test_evaluation_metrics.py -v
+
+# 快速验证
+python -m pytest tests/test_param_counter.py tests/test_statistical_tests.py tests/test_evaluation_metrics.py --tb=no -q
+```
+
+### 7. 论文写作建议
+
+基于工具的输出，论文中应包含：
+
+1. **参数公平性声明**: 使用 `param_counter.py` 的输出说明 baseline 与实验组参数量匹配
+2. **统计显著性表格**: 使用 `StatisticalReport.to_latex()` 生成
+3. **多重比较校正**: 明确使用的校正方法（推荐 Holm）
+4. **难度曲线图**: 展示 accuracy vs difficulty level
+5. **效率分析**: 报告 speedup、convergence ratio、ponder cost
 
 ## 致谢
 

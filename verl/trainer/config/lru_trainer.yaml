@@ -148,26 +148,55 @@ logging:
 
 # Experiment Groups Configuration
 # For ablation studies
+#
+# Parameter counts (for Qwen2.5-0.5B base):
+#   - baseline_original:  630M params
+#   - baseline_matched:   646M params (intermediate_size=5120)
+#   - mla_only:           634M params
+#   - mla_lru_full:       649M params (+2.2% from LRU)
+#
 experiments:
-  # Group A: Baseline (no MLA, no LRU)
+  # ============================================================================
+  # BASELINES (for fair comparison)
+  # ============================================================================
+
+  # Original Qwen-0.5B without modifications
   baseline:
     model:
       mla:
         enabled: false
       lru:
         enabled: false
-    description: "Baseline Qwen-0.5B without MLA/LRU"
+    description: "Baseline Qwen-0.5B (630M params)"
 
-  # Group B: MLA only (no LRU)
+  # Parameter-matched baseline: increase FFN size to match MLA+LRU
+  baseline_matched:
+    model:
+      intermediate_size: 5120  # Adjusted to match MLA+LRU param count (~646M)
+      mla:
+        enabled: false
+      lru:
+        enabled: false
+    description: "Parameter-matched baseline (646M params, fair comparison)"
+
+  # ============================================================================
+  # MLA ABLATION
+  # ============================================================================
+
+  # MLA only (no LRU) - tests compression alone
   mla_only:
     model:
       mla:
         enabled: true
       lru:
         enabled: false
-    description: "MLA attention without LRU reasoning"
+    description: "MLA attention without LRU (634M params)"
 
-  # Group C: MLA + LRU (fixed iterations)
+  # ============================================================================
+  # LRU COMPONENT ABLATION
+  # ============================================================================
+
+  # Full MLA + LRU (fixed iterations)
   mla_lru_fixed:
     model:
       mla:
@@ -175,9 +204,11 @@ experiments:
       lru:
         enabled: true
         halt_threshold: 1.0  # Never halt early = fixed iterations
+        use_positional_mixing: true
+        use_global_halting: true
     description: "MLA + LRU with fixed 8 iterations"
 
-  # Group D: MLA + LRU (adaptive halting)
+  # Full MLA + LRU (adaptive halting) - main experiment
   mla_lru_adaptive:
     model:
       mla:
@@ -185,4 +216,188 @@ experiments:
       lru:
         enabled: true
         halt_threshold: 0.99
-    description: "MLA + LRU with ACT adaptive halting"
+        use_positional_mixing: true
+        use_global_halting: true
+    description: "MLA + LRU with ACT adaptive halting (main)"
+
+  # Ablation: No positional mixing
+  mla_lru_no_pos_mix:
+    model:
+      mla:
+        enabled: true
+      lru:
+        enabled: true
+        halt_threshold: 0.99
+        use_positional_mixing: false
+        use_global_halting: true
+    description: "MLA + LRU without positional mixing"
+
+  # Ablation: No global halting
+  mla_lru_no_global_halt:
+    model:
+      mla:
+        enabled: true
+      lru:
+        enabled: true
+        halt_threshold: 0.99
+        use_positional_mixing: true
+        use_global_halting: false
+    description: "MLA + LRU without global halting"
+
+  # Ablation: No pos_mix AND no global halt (minimal LRU)
+  mla_lru_minimal:
+    model:
+      mla:
+        enabled: true
+      lru:
+        enabled: true
+        halt_threshold: 0.99
+        use_positional_mixing: false
+        use_global_halting: false
+    description: "MLA + LRU minimal (no pos_mix, no global halt)"
+
+  # ============================================================================
+  # ITERATION COUNT ABLATION
+  # ============================================================================
+
+  mla_lru_iter_2:
+    model:
+      mla:
+        enabled: true
+      lru:
+        enabled: true
+        max_iterations: 2
+        halt_threshold: 1.0  # Fixed
+    description: "MLA + LRU with fixed 2 iterations"
+
+  mla_lru_iter_4:
+    model:
+      mla:
+        enabled: true
+      lru:
+        enabled: true
+        max_iterations: 4
+        halt_threshold: 1.0
+    description: "MLA + LRU with fixed 4 iterations"
+
+  mla_lru_iter_8:
+    model:
+      mla:
+        enabled: true
+      lru:
+        enabled: true
+        max_iterations: 8
+        halt_threshold: 1.0
+    description: "MLA + LRU with fixed 8 iterations"
+
+  mla_lru_iter_16:
+    model:
+      mla:
+        enabled: true
+      lru:
+        enabled: true
+        max_iterations: 16
+        halt_threshold: 1.0
+    description: "MLA + LRU with fixed 16 iterations"
+
+  # ============================================================================
+  # LOSS WEIGHT ABLATION
+  # ============================================================================
+
+  # No stability loss
+  mla_lru_no_stability:
+    model:
+      mla:
+        enabled: true
+      lru:
+        enabled: true
+        halt_threshold: 0.99
+    lru_loss:
+      stability_weight: 0.0
+      sparsity_weight: 0.01
+      ponder_weight: 0.001
+    description: "MLA + LRU without stability loss"
+
+  # High stability loss
+  mla_lru_high_stability:
+    model:
+      mla:
+        enabled: true
+      lru:
+        enabled: true
+        halt_threshold: 0.99
+    lru_loss:
+      stability_weight: 0.5
+      sparsity_weight: 0.01
+      ponder_weight: 0.001
+    description: "MLA + LRU with high stability weight (0.5)"
+
+  # No ponder loss
+  mla_lru_no_ponder:
+    model:
+      mla:
+        enabled: true
+      lru:
+        enabled: true
+        halt_threshold: 0.99
+    lru_loss:
+      stability_weight: 0.1
+      sparsity_weight: 0.01
+      ponder_weight: 0.0
+    description: "MLA + LRU without ponder loss"
+
+  # High ponder loss (encourage early stopping)
+  mla_lru_high_ponder:
+    model:
+      mla:
+        enabled: true
+      lru:
+        enabled: true
+        halt_threshold: 0.99
+    lru_loss:
+      stability_weight: 0.1
+      sparsity_weight: 0.01
+      ponder_weight: 0.01
+    description: "MLA + LRU with high ponder weight (0.01)"
+
+  # No auxiliary losses (only CE loss)
+  mla_lru_ce_only:
+    model:
+      mla:
+        enabled: true
+      lru:
+        enabled: true
+        halt_threshold: 0.99
+    lru_loss:
+      stability_weight: 0.0
+      sparsity_weight: 0.0
+      ponder_weight: 0.0
+    description: "MLA + LRU with CE loss only (no LRU losses)"
+
+# ============================================================================
+# ABLATION STUDY SUMMARY
+# ============================================================================
+#
+# Total experiments: 18
+#
+# 1. Baselines (2):
+#    - baseline: original Qwen-0.5B
+#    - baseline_matched: parameter-matched for fair comparison
+#
+# 2. Architecture (3):
+#    - mla_only: just MLA compression
+#    - mla_lru_fixed: MLA + LRU (fixed iter)
+#    - mla_lru_adaptive: MLA + LRU (adaptive) [MAIN]
+#
+# 3. LRU Components (3):
+#    - mla_lru_no_pos_mix: without positional mixing
+#    - mla_lru_no_global_halt: without global halting
+#    - mla_lru_minimal: without both
+#
+# 4. Iteration Count (4):
+#    - mla_lru_iter_2/4/8/16
+#
+# 5. Loss Weights (5):
+#    - mla_lru_no_stability/high_stability
+#    - mla_lru_no_ponder/high_ponder
+#    - mla_lru_ce_only
