@@ -416,6 +416,18 @@ class DeepSeekMLAForCausalLM(PreTrainedModel):
         self.vocab_size = config.vocab_size
         self.lm_head = nn.Linear(config.hidden_size, config.vocab_size, bias=False)
 
+        # LRU loss module for auxiliary losses (stability, sparsity, ponder)
+        if config.use_lru:
+            from verl.trainer.lru.losses import LRULossModule
+            self.lru_loss_module = LRULossModule(
+                stability_weight=getattr(config, 'lru_stability_weight', 0.1),
+                sparsity_weight=getattr(config, 'lru_sparsity_weight', 0.01),
+                ponder_weight=getattr(config, 'lru_ponder_weight', 0.001),
+                max_iterations=config.lru_max_iterations,
+            )
+        else:
+            self.lru_loss_module = None
+
         # Initialize weights
         self.post_init()
 
@@ -474,6 +486,7 @@ class DeepSeekMLAForCausalLM(PreTrainedModel):
         logits = logits.float()
 
         loss = None
+        lru_loss_output = None
         if labels is not None:
             # Shift so that tokens < n predict n
             shift_logits = logits[..., :-1, :].contiguous()
@@ -484,7 +497,34 @@ class DeepSeekMLAForCausalLM(PreTrainedModel):
             shift_labels = shift_labels.view(-1)
             # Enable model parallelism
             shift_labels = shift_labels.to(shift_logits.device)
-            loss = loss_fct(shift_logits, shift_labels)
+            ce_loss = loss_fct(shift_logits, shift_labels)
+
+            # FIXED: Integrate LRU auxiliary losses
+            if self.lru_loss_module is not None and hasattr(outputs, 'lru_outputs') and outputs.lru_outputs:
+                # Aggregate LRU losses from all layers
+                total_lru_loss = torch.tensor(0.0, device=ce_loss.device, dtype=ce_loss.dtype)
+                all_metrics = {}
+
+                for layer_idx, lru_output in enumerate(outputs.lru_outputs):
+                    layer_loss = self.lru_loss_module(lru_output, attention_mask=attention_mask)
+                    total_lru_loss = total_lru_loss + layer_loss.total_loss
+
+                    # Collect metrics from first layer for logging
+                    if layer_idx == 0:
+                        all_metrics = layer_loss.metrics
+
+                # Average across layers
+                num_lru_layers = len(outputs.lru_outputs)
+                total_lru_loss = total_lru_loss / num_lru_layers
+
+                loss = ce_loss + total_lru_loss
+                lru_loss_output = {
+                    'ce_loss': ce_loss,
+                    'lru_loss': total_lru_loss,
+                    'lru_metrics': all_metrics,
+                }
+            else:
+                loss = ce_loss
 
         if not return_dict:
             output = (logits,) + outputs[1:]
@@ -498,9 +538,11 @@ class DeepSeekMLAForCausalLM(PreTrainedModel):
             attentions=outputs.attentions,
         )
 
-        # Pass through LRU outputs for loss computation
+        # Pass through LRU outputs and loss details for logging/analysis
         if hasattr(outputs, 'lru_outputs'):
             output.lru_outputs = outputs.lru_outputs
+        if lru_loss_output is not None:
+            output.lru_loss_details = lru_loss_output
 
         return output
 

@@ -42,6 +42,9 @@ from .lru import (
     LatentReasoningUnit,
     SimpleLRU,
     LRUOutput,
+    PositionalMixing,
+    GlobalHaltingUnit,
+    UniversalTransformerLRU,
 )
 from .modeling_deepseek_mla import (
     DeepSeekMLAPretrainedConfig,

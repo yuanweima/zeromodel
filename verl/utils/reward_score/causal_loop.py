@@ -10,8 +10,11 @@ computing rewards based on:
 """
 
 import re
-import random
+import logging
 from typing import Dict, List, Optional, Tuple
+
+# Set up logger for debug output
+logger = logging.getLogger(__name__)
 
 
 def extract_answer(solution_str: str) -> Optional[str]:
@@ -140,31 +143,24 @@ def compute_score(
     level = ground_truth.get('level', 1)
     num_steps = ground_truth.get('num_steps', 1)
 
-    # Debug printing (random sample)
-    do_print = random.randint(1, 64) == 1
-
     # Extract answer from response
     answer = extract_answer(solution_str)
 
-    if do_print:
-        print(f"--------------------------------")
-        print(f"Level: {level} | Steps: {num_steps}")
-        print(f"Expected: {final_state}")
-        print(f"Extracted answer: {answer}")
-        if answer is None:
-            print(f"Full solution: {solution_str[:500]}...")
+    # Log debug info
+    logger.debug(f"Level: {level} | Steps: {num_steps}")
+    logger.debug(f"Expected: {final_state}")
+    logger.debug(f"Extracted answer: {answer}")
 
     if answer is None:
-        if do_print:
-            print(f"Score: 0 (no answer found)")
+        logger.debug(f"Score: 0 (no answer found)")
+        logger.debug(f"Full solution: {solution_str[:500]}...")
         return 0.0
 
     # Parse the answer into a state dictionary
     parsed_state = parse_state(answer, variables)
 
     if parsed_state is None:
-        if do_print:
-            print(f"Score: 0 (could not parse state)")
+        logger.debug(f"Score: 0 (could not parse state)")
         return 0.0
 
     # Count correct variables
@@ -177,27 +173,23 @@ def compute_score(
         if expected is not None and predicted is not None and expected == predicted:
             correct_count += 1
 
-    if do_print:
-        print(f"Parsed state: {parsed_state}")
-        print(f"Correct: {correct_count}/{total_count}")
+    logger.debug(f"Parsed state: {parsed_state}")
+    logger.debug(f"Correct: {correct_count}/{total_count}")
 
     # Compute score
     if correct_count == total_count:
         # Full score for all correct
         final_score = score
-        if do_print:
-            print(f"Score: {final_score} (all correct)")
+        logger.debug(f"Score: {final_score} (all correct)")
     elif correct_count > 0:
         # Partial score based on correctness ratio
         ratio = correct_count / total_count
         final_score = partial_base + (score - partial_base) * ratio * 0.9
-        if do_print:
-            print(f"Score: {final_score:.3f} (partial: {correct_count}/{total_count})")
+        logger.debug(f"Score: {final_score:.3f} (partial: {correct_count}/{total_count})")
     else:
         # Format is valid but all values wrong
         final_score = format_score
-        if do_print:
-            print(f"Score: {final_score} (format ok, all wrong)")
+        logger.debug(f"Score: {final_score} (format ok, all wrong)")
 
     return final_score
 

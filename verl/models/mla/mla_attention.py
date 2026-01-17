@@ -110,9 +110,10 @@ class MLAAttention(nn.Module):
         )
 
         # Separate projection for K's RoPE dimensions
-        # This allows RoPE to be decoupled from the compressed latent
+        # FIXED: Project from latent space (c_kv) so LRU refinement affects RoPE part too
+        # This ensures the iterative reasoning in LRU influences both content and position
         self.w_k_rope = nn.Linear(
-            self.hidden_size,
+            self.kv_latent_dim,  # Changed from hidden_size to kv_latent_dim
             self.num_kv_heads * self.rope_head_dim,
             bias=config.attention_bias,
         )
@@ -197,8 +198,9 @@ class MLAAttention(nn.Module):
         k_nope = self.w_uk(c_kv)  # [B, S, n_kv * nope_head_dim]
         v = self.w_uv(c_kv)  # [B, S, n_kv * head_dim]
 
-        # Separate RoPE projection for K
-        k_rope = self.w_k_rope(hidden_states)  # [B, S, n_kv * rope_head_dim]
+        # FIXED: K_rope now projects from refined c_kv, not hidden_states
+        # This ensures LRU refinement affects both content and positional parts of K
+        k_rope = self.w_k_rope(c_kv)  # [B, S, n_kv * rope_head_dim]
 
         # Reshape
         k_nope = k_nope.view(batch_size, seq_len, self.num_kv_heads, self.nope_head_dim)
@@ -207,16 +209,16 @@ class MLAAttention(nn.Module):
 
         # === Handle KV Cache ===
         if past_key_value is not None:
-            past_c_kv, past_k_rope = past_key_value
+            past_c_kv, _ = past_key_value  # We no longer cache k_rope separately
             # Concatenate along sequence dimension
             c_kv = torch.cat([past_c_kv, c_kv], dim=1)
-            k_rope = torch.cat([past_k_rope, k_rope.view(batch_size, seq_len, -1)], dim=1)
 
-            # Recompute k_nope and v from full c_kv
+            # Recompute k_nope, k_rope, and v from full c_kv
+            # FIXED: Now k_rope is also recomputed from c_kv for consistency
             kv_seq_len = c_kv.shape[1]
             k_nope = self.w_uk(c_kv).view(batch_size, kv_seq_len, self.num_kv_heads, self.nope_head_dim)
+            k_rope = self.w_k_rope(c_kv).view(batch_size, kv_seq_len, self.num_kv_heads, self.rope_head_dim)
             v = self.w_uv(c_kv).view(batch_size, kv_seq_len, self.num_kv_heads, self.head_dim)
-            k_rope = k_rope.view(batch_size, kv_seq_len, self.num_kv_heads, self.rope_head_dim)
 
         kv_seq_len = k_nope.shape[1]
 
@@ -268,9 +270,10 @@ class MLAAttention(nn.Module):
 
         # === Prepare cache ===
         if use_cache:
-            # Cache the compressed c_kv and k_rope (not full K, V)
-            # This is the key efficiency of MLA
-            past_key_value = (c_kv, k_rope.view(batch_size, kv_seq_len, -1))
+            # Cache only the compressed c_kv (k_rope is recomputed from c_kv)
+            # FIXED: Simplified cache since k_rope now derives from c_kv
+            # The tuple format (c_kv, None) maintains backward compatibility
+            past_key_value = (c_kv, None)
         else:
             past_key_value = None
 
