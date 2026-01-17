@@ -7,11 +7,16 @@ computing rewards based on:
 2. Partial correctness (partial score based on correct variables)
 3. Valid format but wrong answer (format score)
 4. Invalid format (zero score)
+
+NEW: Trajectory validation support
+- Validates intermediate reasoning steps when trajectory is provided
+- Penalizes correct final answers reached through wrong intermediate steps
+- Encourages genuine sequential reasoning vs lucky guessing
 """
 
 import re
 import logging
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple, Any
 
 # Set up logger for debug output
 logger = logging.getLogger(__name__)
@@ -107,6 +112,134 @@ def parse_state(answer_str: str, expected_vars: List[str]) -> Optional[Dict[str,
     return None
 
 
+def extract_intermediate_states(solution_str: str, expected_vars: List[str]) -> List[Dict[str, int]]:
+    """Extract intermediate states from model's reasoning.
+
+    Looks for state descriptions in the <think> section that show
+    intermediate steps of computation.
+
+    Expected patterns in thinking:
+    - "After rule 1: A=5, B=3"
+    - "Step 1: A=5, B=3, C=2"
+    - "State after applying rule 1: A=5"
+    - Just variable assignments like "A becomes 5" or "A is now 5"
+
+    Args:
+        solution_str: Full model output string
+        expected_vars: List of expected variable names
+
+    Returns:
+        List of parsed state dictionaries in order of appearance
+    """
+    # Extract the thinking section
+    think_match = re.search(r'<think>(.*?)</think>', solution_str, re.DOTALL)
+    if not think_match:
+        return []
+
+    think_content = think_match.group(1)
+    intermediates = []
+
+    # Find all lines that look like state descriptions
+    # Pattern 1: "After rule X: A=5, B=3" or "Step X: A=5, B=3"
+    step_patterns = [
+        r'(?:after|step|state|applying)[^:]*:\s*([A-Z\s=,\d]+)',
+        r'(?:now|becomes|results?)[^:]*:\s*([A-Z\s=,\d]+)',
+    ]
+
+    # Split into lines and process
+    lines = think_content.split('\n')
+    for line in lines:
+        line = line.strip()
+        if not line:
+            continue
+
+        # Try to parse state from each line
+        state = {}
+        for var in expected_vars:
+            # Look for patterns like "A=5", "A = 5", "A is 5", "A becomes 5"
+            patterns = [
+                rf'{var}\s*[=:]\s*(-?\d+)',
+                rf'{var}\s+(?:is|becomes|equals?|now)\s+(-?\d+)',
+            ]
+            for pattern in patterns:
+                match = re.search(pattern, line, re.IGNORECASE)
+                if match:
+                    try:
+                        state[var] = int(match.group(1))
+                        break
+                    except (ValueError, IndexError):
+                        continue
+
+        # Only add if we found at least one variable
+        if state:
+            intermediates.append(state)
+
+    return intermediates
+
+
+def validate_trajectory(
+    solution_str: str,
+    expected_trajectory: List[Dict[str, int]],
+    expected_vars: List[str],
+) -> float:
+    """Validate model's intermediate reasoning against expected trajectory.
+
+    Compares the intermediate states extracted from the model's thinking
+    against the expected trajectory of states.
+
+    Args:
+        solution_str: Full model output string
+        expected_trajectory: List of expected intermediate states
+        expected_vars: List of expected variable names
+
+    Returns:
+        Accuracy score between 0.0 and 1.0
+    """
+    if not expected_trajectory:
+        return 1.0  # No trajectory to validate
+
+    # Extract model's intermediate states
+    model_intermediates = extract_intermediate_states(solution_str, expected_vars)
+
+    if not model_intermediates:
+        # Model didn't show intermediate states - can't validate
+        # Return neutral score (don't penalize or reward)
+        return 0.5
+
+    # Compare trajectories
+    # We use a flexible matching - check if model states appear in expected order
+    total_comparisons = 0
+    correct_comparisons = 0
+
+    # For each expected intermediate state, check if model has a similar state
+    for i, expected_state in enumerate(expected_trajectory):
+        # Find the closest matching model state (if any)
+        best_match_score = 0.0
+
+        for model_state in model_intermediates:
+            # Count matching variables
+            matches = 0
+            total_vars = 0
+
+            for var in expected_vars:
+                if var in expected_state:
+                    total_vars += 1
+                    if var in model_state and model_state[var] == expected_state[var]:
+                        matches += 1
+
+            if total_vars > 0:
+                match_score = matches / total_vars
+                best_match_score = max(best_match_score, match_score)
+
+        total_comparisons += 1
+        correct_comparisons += best_match_score
+
+    if total_comparisons == 0:
+        return 1.0
+
+    return correct_comparisons / total_comparisons
+
+
 def compute_score(
     solution_str: str,
     ground_truth: Dict,
@@ -114,6 +247,8 @@ def compute_score(
     format_score: float = 0.1,
     partial_base: float = 0.3,
     score: float = 1.0,
+    validate_intermediates: bool = False,
+    intermediate_penalty: float = 0.2,
 ) -> float:
     """Compute the reward score for a causal loop prediction.
 
@@ -123,6 +258,10 @@ def compute_score(
     0.1 - Valid format but wrong values
     0.0 - Invalid format or no answer
 
+    With trajectory validation (validate_intermediates=True):
+    - Final score is adjusted based on intermediate reasoning accuracy
+    - Encourages correct reasoning process, not just correct answers
+
     Args:
         solution_str: The full model output
         ground_truth: Dictionary containing:
@@ -130,10 +269,13 @@ def compute_score(
             - variables: List[str] of variable names
             - level: int difficulty level (1-4)
             - num_steps: int number of simulation steps
+            - trajectory: Optional[List[Dict]] intermediate states for validation
         method: Scoring method ('strict' for exact match only)
         format_score: Score for valid format but wrong answer
         partial_base: Base score for partial correctness
         score: Score for fully correct answer
+        validate_intermediates: Whether to validate intermediate reasoning steps
+        intermediate_penalty: How much to penalize wrong intermediate reasoning (0-1)
 
     Returns:
         Float reward score
@@ -142,6 +284,7 @@ def compute_score(
     variables = ground_truth['variables']
     level = ground_truth.get('level', 1)
     num_steps = ground_truth.get('num_steps', 1)
+    trajectory = ground_truth.get('trajectory', None)
 
     # Extract answer from response
     answer = extract_answer(solution_str)
@@ -176,20 +319,33 @@ def compute_score(
     logger.debug(f"Parsed state: {parsed_state}")
     logger.debug(f"Correct: {correct_count}/{total_count}")
 
-    # Compute score
+    # Compute base score
     if correct_count == total_count:
         # Full score for all correct
         final_score = score
-        logger.debug(f"Score: {final_score} (all correct)")
+        logger.debug(f"Base score: {final_score} (all correct)")
     elif correct_count > 0:
         # Partial score based on correctness ratio
         ratio = correct_count / total_count
         final_score = partial_base + (score - partial_base) * ratio * 0.9
-        logger.debug(f"Score: {final_score:.3f} (partial: {correct_count}/{total_count})")
+        logger.debug(f"Base score: {final_score:.3f} (partial: {correct_count}/{total_count})")
     else:
         # Format is valid but all values wrong
         final_score = format_score
-        logger.debug(f"Score: {final_score} (format ok, all wrong)")
+        logger.debug(f"Base score: {final_score} (format ok, all wrong)")
+
+    # NEW: Apply trajectory validation if enabled and trajectory is available
+    if validate_intermediates and trajectory is not None and len(trajectory) > 0:
+        intermediate_accuracy = validate_trajectory(solution_str, trajectory, variables)
+        logger.debug(f"Intermediate accuracy: {intermediate_accuracy:.3f}")
+
+        # Adjust final score based on intermediate reasoning quality
+        # If intermediates are wrong but answer is right, reduce reward
+        # This penalizes "lucky guessing" and rewards genuine reasoning
+        if intermediate_accuracy < 1.0:
+            penalty = intermediate_penalty * (1.0 - intermediate_accuracy)
+            final_score = final_score * (1.0 - penalty)
+            logger.debug(f"Score after trajectory penalty: {final_score:.3f}")
 
     return final_score
 

@@ -27,13 +27,18 @@ model:
   # LRU Configuration
   lru:
     enabled: true
-    max_iterations: 8
-    halt_threshold: 0.99
+    max_iterations: 16        # Increased from 8 based on academic review
+    halt_threshold: 0.95      # Lowered from 0.99 for more dynamic halting
     init_halt_bias: -2.0
     use_layer_norm: true
     gradient_checkpointing: true
     # Which layers to apply LRU (null = all)
     layers: null
+    # NEW: Positional mixing type ('conv' or 'attention')
+    # 'attention' enables global cross-position interaction (O(n) complexity)
+    positional_mixing_type: conv
+    # NEW: Enhanced global halting with learnable weights and attention pooling
+    use_enhanced_global_halting: false
 
 # Training Configuration
 training:
@@ -65,13 +70,15 @@ training:
 
 # LRU Loss Configuration
 lru_loss:
-  stability_weight: 0.1
+  stability_weight: 0.05    # Lowered from 0.1 to allow more exploration
   sparsity_weight: 0.01
-  ponder_weight: 0.001
+  ponder_weight: 0.01       # Increased from 0.001 to penalize early halting more
   stability_decay: 0.9
   sparsity_target: 0.8
   warmup_steps: 200
   weight_schedule: linear  # constant, linear, cosine
+  # NEW: Use learnable loss weights (addresses "magic numbers" criticism)
+  use_learnable_weights: false
 
 # PPO Configuration (for RL fine-tuning)
 ppo:
@@ -375,10 +382,99 @@ experiments:
     description: "MLA + LRU with CE loss only (no LRU losses)"
 
 # ============================================================================
+# NEW EXPERIMENTS (Based on Academic Review Feedback)
+# ============================================================================
+
+  # Sequential causal reasoning (tests true multi-step reasoning)
+  sequential_causal:
+    model:
+      mla:
+        enabled: true
+      lru:
+        enabled: true
+        max_iterations: 16
+        halt_threshold: 0.95
+        positional_mixing_type: attention
+        use_enhanced_global_halting: true
+    data:
+      sequential_mode: true
+      include_trajectory: true
+    reward:
+      validate_intermediates: true
+      intermediate_penalty: 0.2
+    description: "Sequential rule application + trajectory validation"
+
+  # Attention mixing vs convolution mixing ablation
+  attention_mixing_ablation:
+    model:
+      mla:
+        enabled: true
+      lru:
+        enabled: true
+        max_iterations: 16
+        halt_threshold: 0.95
+        positional_mixing_type: attention
+        use_enhanced_global_halting: false
+    description: "Attention-based positional mixing (global cross-position interaction)"
+
+  # Learnable loss weights experiment
+  learnable_weights:
+    model:
+      mla:
+        enabled: true
+      lru:
+        enabled: true
+        max_iterations: 16
+        halt_threshold: 0.95
+    lru_loss:
+      use_learnable_weights: true
+      stability_weight: 0.1   # Initial values for learnable weights
+      sparsity_weight: 0.01
+      ponder_weight: 0.001
+    description: "Learnable vs fixed loss weights comparison"
+
+  # Enhanced global halting ablation
+  enhanced_global_halting:
+    model:
+      mla:
+        enabled: true
+      lru:
+        enabled: true
+        max_iterations: 16
+        halt_threshold: 0.95
+        positional_mixing_type: conv
+        use_enhanced_global_halting: true
+    description: "Enhanced global halting with learnable weights and attention pooling"
+
+  # Full scientific improvements (all new features combined)
+  full_scientific:
+    model:
+      mla:
+        enabled: true
+      lru:
+        enabled: true
+        max_iterations: 16
+        halt_threshold: 0.95
+        positional_mixing_type: attention
+        use_enhanced_global_halting: true
+    lru_loss:
+      use_learnable_weights: true
+      stability_weight: 0.05
+      sparsity_weight: 0.01
+      ponder_weight: 0.01
+    data:
+      sequential_mode: true
+      include_trajectory: true
+    reward:
+      validate_intermediates: true
+      intermediate_penalty: 0.2
+    description: "All scientific improvements combined (attention mixing + enhanced halting + learnable weights + sequential + trajectory)"
+
+# ============================================================================
 # ABLATION STUDY SUMMARY
 # ============================================================================
 #
-# Total experiments: 18
+# Total experiments: 23 (18 original + 5 new)
 #
 # 1. Baselines (2):
 #    - baseline: original Qwen-0.5B
@@ -401,3 +497,10 @@ experiments:
 #    - mla_lru_no_stability/high_stability
 #    - mla_lru_no_ponder/high_ponder
 #    - mla_lru_ce_only
+#
+# 6. NEW Scientific Improvements (5):
+#    - sequential_causal: sequential reasoning + trajectory validation
+#    - attention_mixing_ablation: attention vs conv positional mixing
+#    - learnable_weights: learnable vs fixed loss weights
+#    - enhanced_global_halting: enhanced halting mechanism
+#    - full_scientific: all improvements combined

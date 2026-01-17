@@ -85,6 +85,9 @@ class LRUConfig:
         candidate_activation: Activation for candidate state ('tanh' or 'gelu')
         use_layer_norm: Whether to apply LayerNorm after each iteration
         gradient_checkpointing: Whether to use gradient checkpointing for memory
+        positional_mixing_type: Type of cross-position interaction ('conv' or 'attention')
+        use_enhanced_global_halting: Whether to use enhanced halting with learnable weights
+        use_learnable_loss_weights: Whether to use learnable loss weights
         ponder_loss_weight: Weight for the pondering cost loss
         stability_loss_weight: Weight for the stability loss
         sparsity_loss_weight: Weight for the sparsity loss
@@ -98,7 +101,19 @@ class LRUConfig:
     use_layer_norm: bool = True
     gradient_checkpointing: bool = False
 
+    # NEW: Positional mixing configuration
+    # 'conv': Local 3-token window convolution (original)
+    # 'attention': O(n) linear attention for global cross-position interaction
+    positional_mixing_type: Literal['conv', 'attention'] = 'conv'
+
+    # NEW: Enhanced global halting with learnable weights and attention pooling
+    use_enhanced_global_halting: bool = False
+
+    # NEW: Learnable loss weights (addresses "magic number" criticism)
+    use_learnable_loss_weights: bool = False
+
     # Loss weights (can be overridden in trainer config)
+    # If use_learnable_loss_weights=True, these become initial values
     ponder_loss_weight: float = 0.001
     stability_loss_weight: float = 0.1
     sparsity_loss_weight: float = 0.01

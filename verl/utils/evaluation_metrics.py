@@ -625,6 +625,203 @@ def compute_iteration_efficiency(
     }
 
 
+def compute_intermediate_step_accuracy(
+    model_intermediates: List[List[Dict[str, int]]],
+    expected_trajectories: List[List[Dict[str, int]]],
+    variables_list: List[List[str]],
+) -> Dict[str, float]:
+    """Compute accuracy of intermediate reasoning steps.
+
+    NEW: Added based on academic review feedback to measure
+    reasoning quality, not just final answer accuracy.
+
+    Args:
+        model_intermediates: List of model's intermediate states per sample
+        expected_trajectories: List of expected intermediate states per sample
+        variables_list: List of variable names per sample
+
+    Returns:
+        Dictionary with intermediate step accuracy metrics
+    """
+    if not model_intermediates or not expected_trajectories:
+        return {
+            'intermediate_accuracy': 0.0,
+            'step_by_step_accuracy': [],
+            'samples_with_full_trace': 0,
+        }
+
+    total_matches = 0
+    total_comparisons = 0
+    step_accuracies = []
+    full_trace_count = 0
+
+    for model_states, expected_states, variables in zip(
+        model_intermediates, expected_trajectories, variables_list
+    ):
+        if not model_states or not expected_states:
+            continue
+
+        if len(model_states) >= len(expected_states):
+            full_trace_count += 1
+
+        # Compare each expected state to closest model state
+        sample_matches = 0
+        for i, expected in enumerate(expected_states):
+            best_match = 0.0
+            for model_state in model_states:
+                matches = sum(
+                    1 for v in variables
+                    if v in expected and v in model_state
+                    and expected[v] == model_state[v]
+                )
+                total_vars = sum(1 for v in variables if v in expected)
+                if total_vars > 0:
+                    match_ratio = matches / total_vars
+                    best_match = max(best_match, match_ratio)
+
+            sample_matches += best_match
+            total_comparisons += 1
+            if len(step_accuracies) <= i:
+                step_accuracies.append([])
+            step_accuracies[i].append(best_match)
+
+        total_matches += sample_matches
+
+    intermediate_accuracy = total_matches / max(total_comparisons, 1)
+    step_by_step = [np.mean(accs) if accs else 0.0 for accs in step_accuracies]
+
+    return {
+        'intermediate_accuracy': intermediate_accuracy,
+        'step_by_step_accuracy': step_by_step,
+        'samples_with_full_trace': full_trace_count,
+    }
+
+
+def compute_iteration_complexity_correlation(
+    iterations_used: List[float],
+    problem_complexities: List[int],
+) -> Dict[str, float]:
+    """Compute correlation between iterations and problem complexity.
+
+    NEW: Added based on academic review to verify that the model
+    uses more iterations for harder problems (adaptive behavior).
+
+    Args:
+        iterations_used: List of iteration counts per sample
+        problem_complexities: List of complexity measures (e.g., level) per sample
+
+    Returns:
+        Dictionary with correlation analysis
+    """
+    if not iterations_used or not problem_complexities:
+        return {
+            'correlation': 0.0,
+            'p_value': 1.0,
+            'avg_iterations_by_complexity': {},
+            'adaptive_behavior_score': 0.0,
+        }
+
+    iters = np.array(iterations_used)
+    complexity = np.array(problem_complexities)
+
+    # Pearson correlation
+    if len(iters) > 1 and np.std(iters) > 0 and np.std(complexity) > 0:
+        correlation = np.corrcoef(iters, complexity)[0, 1]
+    else:
+        correlation = 0.0
+
+    # Average iterations by complexity level
+    avg_by_complexity = {}
+    for c, i in zip(complexity, iters):
+        if c not in avg_by_complexity:
+            avg_by_complexity[c] = []
+        avg_by_complexity[c].append(i)
+    avg_by_complexity = {k: np.mean(v) for k, v in avg_by_complexity.items()}
+
+    # Adaptive behavior score: is there a positive trend?
+    sorted_levels = sorted(avg_by_complexity.keys())
+    if len(sorted_levels) >= 2:
+        avgs = [avg_by_complexity[l] for l in sorted_levels]
+        increases = sum(1 for i in range(len(avgs)-1) if avgs[i+1] > avgs[i])
+        adaptive_score = increases / (len(avgs) - 1)
+    else:
+        adaptive_score = 0.5
+
+    return {
+        'correlation': correlation,
+        'avg_iterations_by_complexity': avg_by_complexity,
+        'adaptive_behavior_score': adaptive_score,
+    }
+
+
+def compute_convergence_quality(
+    intermediate_states: List[np.ndarray],
+    final_states: List[np.ndarray],
+    initial_states: List[np.ndarray],
+) -> Dict[str, float]:
+    """Compute convergence quality metrics.
+
+    NEW: Added based on academic review to measure how well
+    the LRU converges to stable representations.
+
+    Residual ratio: ||final - initial|| / ||state_1 - initial||
+    Lower ratio indicates better convergence.
+
+    Args:
+        intermediate_states: List of [num_iters, ...] state tensors
+        final_states: List of final state tensors
+        initial_states: List of initial state tensors
+
+    Returns:
+        Dictionary with convergence quality metrics
+    """
+    if not intermediate_states or not final_states or not initial_states:
+        return {
+            'avg_residual_ratio': 0.0,
+            'convergence_quality': 0.0,
+            'stable_samples_ratio': 0.0,
+        }
+
+    residual_ratios = []
+    stable_count = 0
+
+    for intermediates, final, initial in zip(
+        intermediate_states, final_states, initial_states
+    ):
+        if intermediates is None or len(intermediates) < 2:
+            continue
+
+        # Compute norms
+        initial_change = np.linalg.norm(intermediates[0] - initial)
+        final_change = np.linalg.norm(final - initial)
+
+        if initial_change > 1e-8:
+            ratio = final_change / initial_change
+            residual_ratios.append(ratio)
+
+            # Consider stable if final change is less than initial change
+            if ratio < 1.0:
+                stable_count += 1
+
+    if not residual_ratios:
+        return {
+            'avg_residual_ratio': 0.0,
+            'convergence_quality': 0.0,
+            'stable_samples_ratio': 0.0,
+        }
+
+    avg_ratio = np.mean(residual_ratios)
+    # Convergence quality: higher is better (inverse of ratio, capped)
+    convergence_quality = min(1.0 / max(avg_ratio, 0.01), 1.0)
+    stable_ratio = stable_count / len(residual_ratios)
+
+    return {
+        'avg_residual_ratio': avg_ratio,
+        'convergence_quality': convergence_quality,
+        'stable_samples_ratio': stable_ratio,
+    }
+
+
 def compare_experiments(
     reports: Dict[str, EvaluationReport],
     baseline_name: str = 'baseline',

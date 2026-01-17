@@ -78,18 +78,65 @@ class CausalRule:
 
 @dataclass
 class CausalGraph:
-    """A causal graph with variables and rules."""
+    """A causal graph with variables and rules.
+
+    Supports two execution modes:
+    1. Parallel (default): All rules read from the same old state (simultaneous)
+    2. Sequential: Rules read from the updated state (truly sequential reasoning)
+
+    The sequential mode tests true multi-step reasoning ability, as the model
+    must track state changes through the rule chain within a single time step.
+    """
     variables: List[str]
     rules: List[CausalRule]
     initial_state: Dict[str, int] = field(default_factory=dict)
+    apply_sequentially: bool = False  # NEW: Sequential vs parallel rule application
 
     def step(self, state: Dict[str, int]) -> Dict[str, int]:
-        """Execute one step of causal propagation."""
+        """Execute one step of causal propagation.
+
+        If apply_sequentially=True, each rule reads from the updated state,
+        requiring the model to reason about intermediate changes.
+        """
         new_state = state.copy()
-        # Apply rules in order
-        for rule in self.rules:
-            new_state[rule.target] = rule.apply(state)
+
+        if self.apply_sequentially:
+            # Sequential: each rule reads from updated state
+            # This tests true multi-step reasoning
+            for rule in self.rules:
+                new_state[rule.target] = rule.apply(new_state)  # Read new state
+        else:
+            # Parallel: all rules read from old state (original behavior)
+            for rule in self.rules:
+                new_state[rule.target] = rule.apply(state)  # Read old state
+
         return new_state
+
+    def step_with_trace(self, state: Dict[str, int]) -> Tuple[Dict[str, int], List[Dict[str, int]]]:
+        """Execute one step and return intermediate states after each rule.
+
+        Useful for trajectory validation - records the state after each rule
+        is applied when in sequential mode.
+
+        Returns:
+            Tuple of (final_state, intermediate_states)
+            intermediate_states[i] is the state after rule i is applied
+        """
+        new_state = state.copy()
+        intermediates = []
+
+        if self.apply_sequentially:
+            for rule in self.rules:
+                new_state[rule.target] = rule.apply(new_state)
+                intermediates.append(new_state.copy())
+        else:
+            # In parallel mode, intermediate states don't make as much sense
+            # but we still record them for consistency
+            for rule in self.rules:
+                new_state[rule.target] = rule.apply(state)
+            intermediates.append(new_state.copy())
+
+        return new_state, intermediates
 
     def simulate(self, num_steps: int) -> List[Dict[str, int]]:
         """Simulate the causal graph for multiple steps."""
@@ -99,6 +146,26 @@ class CausalGraph:
             current = self.step(current)
             states.append(current.copy())
         return states
+
+    def simulate_with_trajectory(self, num_steps: int) -> Tuple[List[Dict[str, int]], List[List[Dict[str, int]]]]:
+        """Simulate and return full trajectory including intermediate states.
+
+        Returns:
+            Tuple of (states, trajectories)
+            - states: [state_0, state_1, ..., state_n] - state at each time step
+            - trajectories: [[intermediates_step_1], [intermediates_step_2], ...]
+              where each intermediate list contains states after each rule
+        """
+        states = [self.initial_state.copy()]
+        trajectories = []
+        current = self.initial_state.copy()
+
+        for _ in range(num_steps):
+            current, intermediates = self.step_with_trace(current)
+            states.append(current.copy())
+            trajectories.append(intermediates)
+
+        return states, trajectories
 
     def get_final_state(self, num_steps: int) -> Dict[str, int]:
         """Get the final state after simulation."""
@@ -288,6 +355,8 @@ def generate_dataset(
     levels: List[int] = [1, 2, 3, 4],
     level_weights: Optional[List[float]] = None,
     seed: int = 42,
+    apply_sequentially: bool = False,
+    include_trajectory: bool = False,
 ) -> List[Dict]:
     """Generate a dataset of causal loop problems.
 
@@ -296,6 +365,9 @@ def generate_dataset(
         levels: List of difficulty levels to include
         level_weights: Optional weights for each level (default: uniform)
         seed: Random seed
+        apply_sequentially: If True, rules are applied sequentially within each step
+                           (each rule reads from updated state). Tests true sequential reasoning.
+        include_trajectory: If True, include intermediate states in output for trajectory validation.
 
     Returns:
         List of problem dictionaries
@@ -317,9 +389,23 @@ def generate_dataset(
 
         # Generate problem
         graph, num_steps = generator.generate(level)
-        final_state = graph.get_final_state(num_steps)
 
-        samples.append({
+        # Set execution mode
+        graph.apply_sequentially = apply_sequentially
+
+        # Get final state and optionally trajectory
+        if include_trajectory:
+            states, trajectories = graph.simulate_with_trajectory(num_steps)
+            final_state = states[-1]
+            # Flatten trajectory for storage: list of state dicts at each rule application
+            flat_trajectory = []
+            for step_intermediates in trajectories:
+                flat_trajectory.extend(step_intermediates)
+        else:
+            final_state = graph.get_final_state(num_steps)
+            flat_trajectory = None
+
+        sample = {
             'level': level,
             'variables': graph.variables,
             'rules': [r.to_string() for r in graph.rules],
@@ -327,8 +413,14 @@ def generate_dataset(
             'num_steps': num_steps,
             'final_state': final_state,
             'problem_text': graph.to_problem_string(num_steps),
+            'apply_sequentially': apply_sequentially,
             '_graph': graph,  # For prefix generation
-        })
+        }
+
+        if flat_trajectory is not None:
+            sample['trajectory'] = flat_trajectory
+
+        samples.append(sample)
 
     return samples
 
@@ -346,6 +438,13 @@ if __name__ == '__main__':
     parser.add_argument('--template_type', type=str, default='base',
                         choices=['base', 'qwen-instruct'])
     parser.add_argument('--seed', type=int, default=42)
+    # NEW: Sequential mode options
+    parser.add_argument('--sequential', action='store_true',
+                        help='Apply rules sequentially (each reads updated state). '
+                             'Tests true multi-step reasoning vs memorization.')
+    parser.add_argument('--include_trajectory', action='store_true',
+                        help='Include intermediate states for trajectory validation. '
+                             'Used with --sequential for validating reasoning process.')
 
     args = parser.parse_args()
 
@@ -355,7 +454,13 @@ if __name__ == '__main__':
     if args.level_weights:
         level_weights = [float(x) for x in args.level_weights.split(',')]
 
-    data_source = 'causal_loop'
+    # Determine data source name based on mode
+    if args.sequential:
+        data_source = 'causal_loop_sequential'
+        print("Using SEQUENTIAL rule application (tests true reasoning)")
+    else:
+        data_source = 'causal_loop'
+        print("Using PARALLEL rule application (standard mode)")
 
     # Generate datasets
     print(f"Generating {args.train_size} training samples...")
@@ -364,6 +469,8 @@ if __name__ == '__main__':
         levels=levels,
         level_weights=level_weights,
         seed=args.seed,
+        apply_sequentially=args.sequential,
+        include_trajectory=args.include_trajectory,
     )
 
     print(f"Generating {args.test_size} test samples...")
@@ -372,6 +479,8 @@ if __name__ == '__main__':
         levels=levels,
         level_weights=level_weights,
         seed=args.seed + 10000,  # Different seed for test
+        apply_sequentially=args.sequential,
+        include_trajectory=args.include_trajectory,
     )
 
     def make_map_fn(split):
@@ -386,7 +495,12 @@ if __name__ == '__main__':
                 'variables': sample['variables'],
                 'level': sample['level'],
                 'num_steps': sample['num_steps'],
+                'apply_sequentially': sample.get('apply_sequentially', False),
             }
+
+            # Include trajectory if available (for trajectory validation in reward)
+            if 'trajectory' in sample:
+                solution['trajectory'] = sample['trajectory']
 
             data = {
                 'data_source': data_source,
@@ -404,6 +518,7 @@ if __name__ == '__main__':
                     'index': idx,
                     'level': sample['level'],
                     'num_steps': sample['num_steps'],
+                    'sequential_mode': sample.get('apply_sequentially', False),
                 },
             }
             return data

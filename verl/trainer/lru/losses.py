@@ -43,6 +43,85 @@ class LRULossOutput:
     metrics: Dict[str, torch.Tensor]
 
 
+class LearnableLossWeights(nn.Module):
+    """Learnable loss weights with log-softplus parameterization.
+
+    Addresses academic review feedback about "magic number" weights (0.1, 0.01, 0.001)
+    by making weights learnable while constraining them to reasonable ranges.
+
+    The parameterization uses log-softplus to ensure:
+    1. Weights are always positive
+    2. Gradients flow smoothly
+    3. Weights remain in sensible ranges [min_weight, max_weight]
+
+    Usage:
+        learnable_weights = LearnableLossWeights()
+        weights = learnable_weights()  # Returns dict of current weights
+
+        # In optimizer:
+        # Use separate param group with lower LR (0.1x base_lr recommended)
+        optimizer = Adam([
+            {'params': model.parameters()},
+            {'params': learnable_weights.parameters(), 'lr': base_lr * 0.1},
+        ])
+    """
+
+    def __init__(
+        self,
+        init_stability: float = 0.1,
+        init_sparsity: float = 0.01,
+        init_ponder: float = 0.001,
+        min_weight: float = 1e-6,
+        max_weight: float = 1.0,
+    ):
+        super().__init__()
+        self.min_weight = min_weight
+        self.max_weight = max_weight
+
+        # Initialize parameters in log-space for stability
+        # softplus(x) = log(1 + exp(x)), inverse is: x = log(exp(y) - 1)
+        def inverse_softplus(y):
+            """Inverse of softplus for initialization."""
+            return torch.log(torch.exp(torch.tensor(y)) - 1 + 1e-8)
+
+        self.log_stability = nn.Parameter(inverse_softplus(init_stability))
+        self.log_sparsity = nn.Parameter(inverse_softplus(init_sparsity))
+        self.log_ponder = nn.Parameter(inverse_softplus(init_ponder))
+
+    def _get_weight(self, log_weight: torch.Tensor) -> torch.Tensor:
+        """Convert log parameter to clamped weight."""
+        weight = F.softplus(log_weight)
+        return weight.clamp(self.min_weight, self.max_weight)
+
+    @property
+    def stability_weight(self) -> torch.Tensor:
+        return self._get_weight(self.log_stability)
+
+    @property
+    def sparsity_weight(self) -> torch.Tensor:
+        return self._get_weight(self.log_sparsity)
+
+    @property
+    def ponder_weight(self) -> torch.Tensor:
+        return self._get_weight(self.log_ponder)
+
+    def forward(self) -> Dict[str, torch.Tensor]:
+        """Return current weight values as a dictionary."""
+        return {
+            'stability': self.stability_weight,
+            'sparsity': self.sparsity_weight,
+            'ponder': self.ponder_weight,
+        }
+
+    def get_weight_dict(self) -> Dict[str, float]:
+        """Return detached weight values for logging."""
+        return {
+            'stability': self.stability_weight.item(),
+            'sparsity': self.sparsity_weight.item(),
+            'ponder': self.ponder_weight.item(),
+        }
+
+
 class StabilityLoss(nn.Module):
     """Stability loss for encouraging representation convergence.
 
@@ -230,6 +309,13 @@ class LRULossModule(nn.Module):
 
     Computes and combines all LRU-specific losses with configurable
     weights. Supports weight scheduling for curriculum learning.
+
+    Supports two weight modes:
+    1. Fixed weights (default): Use provided weight values directly
+    2. Learnable weights: Weights are learned during training (recommended)
+
+    When using learnable weights, the weight parameters should be added to
+    a separate optimizer param group with lower learning rate (0.1x recommended).
     """
 
     def __init__(
@@ -242,26 +328,59 @@ class LRULossModule(nn.Module):
         max_iterations: int = 8,
         warmup_steps: int = 0,
         weight_schedule: str = 'constant',  # 'constant', 'linear', 'cosine'
+        use_learnable_weights: bool = False,
     ):
         super().__init__()
 
-        # Loss weights
-        self.stability_weight = stability_weight
-        self.sparsity_weight = sparsity_weight
-        self.ponder_weight = ponder_weight
+        self.use_learnable_weights = use_learnable_weights
+
+        # Loss weights - either fixed or learnable
+        if use_learnable_weights:
+            self.learnable_weights = LearnableLossWeights(
+                init_stability=stability_weight,
+                init_sparsity=sparsity_weight,
+                init_ponder=ponder_weight,
+            )
+            # These are just for reference/logging
+            self._init_stability_weight = stability_weight
+            self._init_sparsity_weight = sparsity_weight
+            self._init_ponder_weight = ponder_weight
+        else:
+            self.learnable_weights = None
+            self.stability_weight = stability_weight
+            self.sparsity_weight = sparsity_weight
+            self.ponder_weight = ponder_weight
 
         # Loss modules
         self.stability_loss = StabilityLoss(decay=stability_decay)
         self.sparsity_loss = SparsityLoss(target_sparsity=sparsity_target)
         self.ponder_loss = PonderLoss(max_iterations=max_iterations)
 
-        # Scheduling
+        # Scheduling (only applies to fixed weights)
         self.warmup_steps = warmup_steps
         self.weight_schedule = weight_schedule
         self.current_step = 0
 
-    def _get_scheduled_weights(self) -> Dict[str, float]:
+    def get_weight_params(self):
+        """Get parameters for learnable weights (for separate optimizer group).
+
+        Usage:
+            optimizer = Adam([
+                {'params': model.parameters(), 'lr': base_lr},
+                {'params': loss_module.get_weight_params(), 'lr': base_lr * 0.1},
+            ])
+        """
+        if self.learnable_weights is not None:
+            return self.learnable_weights.parameters()
+        return []
+
+    def _get_scheduled_weights(self) -> Dict[str, Union[float, torch.Tensor]]:
         """Get loss weights based on current training step."""
+        # If using learnable weights, return them directly (no scheduling)
+        if self.use_learnable_weights and self.learnable_weights is not None:
+            return self.learnable_weights()
+
+        # Fixed weights with scheduling
         if self.current_step < self.warmup_steps:
             # During warmup, reduce auxiliary loss weights
             warmup_factor = self.current_step / max(self.warmup_steps, 1)
@@ -341,6 +460,13 @@ class LRULossModule(nn.Module):
                 'lru/ponder_loss': ponder,
                 'lru/total_loss': total_loss,
             }
+
+            # Add weight values to metrics if learnable
+            if self.use_learnable_weights and self.learnable_weights is not None:
+                weight_dict = self.learnable_weights.get_weight_dict()
+                metrics['lru/weight_stability'] = weight_dict['stability']
+                metrics['lru/weight_sparsity'] = weight_dict['sparsity']
+                metrics['lru/weight_ponder'] = weight_dict['ponder']
 
         return LRULossOutput(
             total_loss=total_loss,

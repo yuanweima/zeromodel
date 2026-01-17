@@ -676,6 +676,266 @@ def test_full_model():
     return True
 
 
+def test_attention_positional_mixing():
+    """Test the new AttentionPositionalMixing module."""
+    print("\n" + "=" * 60)
+    print("Test 10: Attention Positional Mixing (NEW)")
+    print("=" * 60)
+
+    from verl.models.mla.lru import AttentionPositionalMixing
+
+    # Test basic functionality
+    latent_dim = 64
+    batch_size, seq_len = 2, 16
+
+    attn_mix = AttentionPositionalMixing(latent_dim=latent_dim, num_heads=1)
+
+    x = torch.randn(batch_size, seq_len, latent_dim)
+    output = attn_mix(x)
+
+    assert output.shape == x.shape, f"Expected {x.shape}, got {output.shape}"
+    print(f"  Input shape: {x.shape}")
+    print(f"  Output shape: {output.shape}")
+
+    # Test causality: output at position i should not depend on inputs at j > i
+    # We test by checking that masking future positions doesn't change past outputs
+    x_test = torch.randn(1, 8, latent_dim)
+    out_full = attn_mix(x_test)
+
+    # Modify the last 4 positions
+    x_modified = x_test.clone()
+    x_modified[:, 4:, :] = torch.randn(1, 4, latent_dim)
+    out_modified = attn_mix(x_modified)
+
+    # First 4 positions should be identical (causal property)
+    diff = (out_full[:, :4, :] - out_modified[:, :4, :]).abs().max()
+    print(f"  Causality test - max diff in first 4 positions: {diff:.6f}")
+
+    # Test gradient flow
+    x_grad = torch.randn(batch_size, seq_len, latent_dim, requires_grad=True)
+    out_grad = attn_mix(x_grad)
+    loss = out_grad.sum()
+    loss.backward()
+
+    assert x_grad.grad is not None, "Gradient should flow back"
+    print(f"  Gradient flow: OK (grad norm: {x_grad.grad.norm():.4f})")
+
+    print("  [PASS] Attention Positional Mixing tests passed!")
+    return True
+
+
+def test_enhanced_global_halting():
+    """Test the new EnhancedGlobalHaltingUnit module."""
+    print("\n" + "=" * 60)
+    print("Test 11: Enhanced Global Halting (NEW)")
+    print("=" * 60)
+
+    from verl.models.mla.lru import EnhancedGlobalHaltingUnit
+
+    latent_dim = 64
+    batch_size, seq_len = 2, 16
+
+    # Test basic functionality
+    halt_unit = EnhancedGlobalHaltingUnit(
+        latent_dim=latent_dim,
+        init_global_weight=0.3,
+        use_attention_pool=True,
+        use_convergence_bonus=True,
+    )
+
+    state = torch.randn(batch_size, seq_len, latent_dim)
+    local_halt = torch.sigmoid(torch.randn(batch_size, seq_len))
+    input_state = torch.randn(batch_size, seq_len, latent_dim)
+
+    combined_halt = halt_unit(state, local_halt, input_state=input_state)
+
+    assert combined_halt.shape == local_halt.shape, f"Expected {local_halt.shape}, got {combined_halt.shape}"
+    print(f"  Local halt shape: {local_halt.shape}")
+    print(f"  Combined halt shape: {combined_halt.shape}")
+
+    # Test learnable global weight
+    initial_weight = halt_unit.global_weight.item()
+    print(f"  Initial global weight: {initial_weight:.4f}")
+
+    # Test with attention mask
+    attention_mask = torch.ones(batch_size, seq_len)
+    attention_mask[:, -4:] = 0  # Mask last 4 positions
+
+    combined_with_mask = halt_unit(state, local_halt, attention_mask=attention_mask)
+    print(f"  Combined halt with mask shape: {combined_with_mask.shape}")
+
+    # Test gradient flow for learnable weight
+    state_grad = torch.randn(batch_size, seq_len, latent_dim, requires_grad=True)
+    local_halt_grad = torch.sigmoid(torch.randn(batch_size, seq_len, requires_grad=True))
+    combined_grad = halt_unit(state_grad, local_halt_grad)
+    loss = combined_grad.sum()
+    loss.backward()
+
+    assert halt_unit.log_global_weight.grad is not None, "Global weight should have gradient"
+    print(f"  Global weight gradient: {halt_unit.log_global_weight.grad:.6f}")
+
+    print("  [PASS] Enhanced Global Halting tests passed!")
+    return True
+
+
+def test_learnable_loss_weights():
+    """Test the new LearnableLossWeights module."""
+    print("\n" + "=" * 60)
+    print("Test 12: Learnable Loss Weights (NEW)")
+    print("=" * 60)
+
+    from verl.trainer.lru.losses import LearnableLossWeights, LRULossModule
+    from verl.models.mla.lru import LRUOutput
+
+    # Test LearnableLossWeights directly
+    weights = LearnableLossWeights(
+        init_stability=0.1,
+        init_sparsity=0.01,
+        init_ponder=0.001,
+    )
+
+    weight_dict = weights()
+    print(f"  Initial weights:")
+    print(f"    stability: {weight_dict['stability'].item():.6f}")
+    print(f"    sparsity: {weight_dict['sparsity'].item():.6f}")
+    print(f"    ponder: {weight_dict['ponder'].item():.6f}")
+
+    # Verify weights are close to initial values
+    assert abs(weight_dict['stability'].item() - 0.1) < 0.01, "Stability weight not close to init"
+    assert abs(weight_dict['sparsity'].item() - 0.01) < 0.001, "Sparsity weight not close to init"
+    assert abs(weight_dict['ponder'].item() - 0.001) < 0.0001, "Ponder weight not close to init"
+
+    # Test gradient flow
+    loss = weight_dict['stability'] + weight_dict['sparsity'] + weight_dict['ponder']
+    loss.backward()
+
+    assert weights.log_stability.grad is not None, "Stability should have gradient"
+    assert weights.log_sparsity.grad is not None, "Sparsity should have gradient"
+    assert weights.log_ponder.grad is not None, "Ponder should have gradient"
+    print(f"  Gradient flow: OK")
+
+    # Test LRULossModule with learnable weights
+    batch_size, seq_len, latent_dim = 2, 16, 64
+    num_iters = 5
+
+    lru_loss_module = LRULossModule(
+        stability_weight=0.1,
+        sparsity_weight=0.01,
+        ponder_weight=0.001,
+        use_learnable_weights=True,
+    )
+
+    # Check that learnable weights module was created
+    assert lru_loss_module.learnable_weights is not None, "Learnable weights should be created"
+    print(f"  LRULossModule with learnable weights: OK")
+
+    # Test forward pass
+    lru_output = LRUOutput(
+        output=torch.randn(batch_size, seq_len, latent_dim),
+        halting_probabilities=torch.rand(batch_size, seq_len),
+        num_iterations=torch.randint(1, 8, (batch_size, seq_len)).float(),
+        remainders=torch.rand(batch_size, seq_len) * 0.1,
+        intermediate_states=torch.randn(num_iters, batch_size, seq_len, latent_dim),
+    )
+
+    loss_output = lru_loss_module(lru_output)
+    print(f"  Loss output total: {loss_output.total_loss.item():.6f}")
+
+    # Check that weight metrics are in output
+    assert 'lru/weight_stability' in loss_output.metrics, "Weight metrics should be included"
+    print(f"  Weight metrics included: OK")
+
+    # Test get_weight_params for optimizer
+    weight_params = list(lru_loss_module.get_weight_params())
+    assert len(weight_params) == 3, "Should have 3 weight parameters"
+    print(f"  Weight parameters for optimizer: {len(weight_params)}")
+
+    print("  [PASS] Learnable Loss Weights tests passed!")
+    return True
+
+
+def test_lru_with_new_options():
+    """Test LRU with new configuration options."""
+    print("\n" + "=" * 60)
+    print("Test 13: LRU with New Options (NEW)")
+    print("=" * 60)
+
+    from verl.models.mla.config import LRUConfig
+    from verl.models.mla.lru import LatentReasoningUnit
+
+    batch_size, seq_len, latent_dim = 2, 16, 64
+
+    # Test with attention mixing
+    config_attn = LRUConfig(
+        latent_dim=latent_dim,
+        max_iterations=8,
+        halt_threshold=0.99,
+        positional_mixing_type='attention',
+        use_enhanced_global_halting=False,
+    )
+
+    lru_attn = LatentReasoningUnit(
+        config_attn,
+        use_positional_mixing=True,
+        use_global_halting=True,
+    )
+
+    x = torch.randn(batch_size, seq_len, latent_dim)
+    output_attn, info_attn = lru_attn(x, return_intermediates=True)
+
+    assert output_attn.shape == x.shape, f"Expected {x.shape}, got {output_attn.shape}"
+    print(f"  LRU with attention mixing:")
+    print(f"    Output shape: {output_attn.shape}")
+    print(f"    Avg iterations: {info_attn.num_iterations.mean():.2f}")
+
+    # Test with enhanced global halting
+    config_enhanced = LRUConfig(
+        latent_dim=latent_dim,
+        max_iterations=8,
+        halt_threshold=0.99,
+        positional_mixing_type='conv',
+        use_enhanced_global_halting=True,
+    )
+
+    lru_enhanced = LatentReasoningUnit(
+        config_enhanced,
+        use_positional_mixing=True,
+        use_global_halting=True,
+    )
+
+    output_enhanced, info_enhanced = lru_enhanced(x, return_intermediates=True)
+
+    assert output_enhanced.shape == x.shape
+    print(f"  LRU with enhanced global halting:")
+    print(f"    Output shape: {output_enhanced.shape}")
+    print(f"    Avg iterations: {info_enhanced.num_iterations.mean():.2f}")
+
+    # Test with both
+    config_full = LRUConfig(
+        latent_dim=latent_dim,
+        max_iterations=8,
+        halt_threshold=0.99,
+        positional_mixing_type='attention',
+        use_enhanced_global_halting=True,
+    )
+
+    lru_full = LatentReasoningUnit(
+        config_full,
+        use_positional_mixing=True,
+        use_global_halting=True,
+    )
+
+    output_full, info_full = lru_full(x, return_intermediates=True)
+
+    assert output_full.shape == x.shape
+    print(f"  LRU with all enhancements:")
+    print(f"    Output shape: {output_full.shape}")
+    print(f"    Avg iterations: {info_full.num_iterations.mean():.2f}")
+
+    print("  [PASS] LRU with New Options tests passed!")
+    return True
+
+
 def run_all_tests():
     """Run all tests."""
     print("\n" + "=" * 60)
@@ -692,6 +952,11 @@ def run_all_tests():
         ("Causal Loop Data", test_causal_loop_data),
         ("Causal Loop Reward", test_causal_loop_reward),
         ("Full Model", test_full_model),
+        # NEW TESTS
+        ("Attention Positional Mixing", test_attention_positional_mixing),
+        ("Enhanced Global Halting", test_enhanced_global_halting),
+        ("Learnable Loss Weights", test_learnable_loss_weights),
+        ("LRU with New Options", test_lru_with_new_options),
     ]
 
     results = []

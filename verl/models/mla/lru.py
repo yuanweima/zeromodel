@@ -124,6 +124,104 @@ class PositionalMixing(nn.Module):
         return x + gate * (mixed - x)
 
 
+class AttentionPositionalMixing(nn.Module):
+    """Linear attention-based cross-position interaction.
+
+    Replaces convolution-based mixing with O(n) linear attention
+    that enables global cross-token interaction while maintaining causality.
+
+    Based on academic review feedback that conv mixing with kernel=3
+    has limited range and doesn't enable true cross-position reasoning.
+    """
+
+    def __init__(
+        self,
+        latent_dim: int,
+        num_heads: int = 1,
+        dropout: float = 0.0,
+    ):
+        super().__init__()
+        self.latent_dim = latent_dim
+        self.num_heads = num_heads
+        self.head_dim = latent_dim // num_heads
+
+        assert latent_dim % num_heads == 0, "latent_dim must be divisible by num_heads"
+
+        # Single-head attention for efficiency
+        self.q_proj = nn.Linear(latent_dim, latent_dim, bias=False)
+        self.k_proj = nn.Linear(latent_dim, latent_dim, bias=False)
+        self.v_proj = nn.Linear(latent_dim, latent_dim, bias=False)
+        self.out_proj = nn.Linear(latent_dim, latent_dim)
+
+        # Gated residual connection
+        self.gate = nn.Linear(latent_dim * 2, latent_dim)
+
+        # Feature map for linear attention (elu + 1 for positive values)
+        self.dropout = nn.Dropout(dropout)
+
+    def _feature_map(self, x: torch.Tensor) -> torch.Tensor:
+        """Feature map for linear attention: elu(x) + 1 ensures positivity."""
+        return F.elu(x) + 1.0
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """
+        Linear attention with causal masking via cumulative sum.
+
+        Args:
+            x: Input tensor [B, S, D]
+
+        Returns:
+            Mixed tensor [B, S, D]
+        """
+        batch_size, seq_len, _ = x.shape
+
+        # Project to Q, K, V
+        q = self.q_proj(x)  # [B, S, D]
+        k = self.k_proj(x)  # [B, S, D]
+        v = self.v_proj(x)  # [B, S, D]
+
+        # Reshape for multi-head (though typically single-head)
+        q = q.view(batch_size, seq_len, self.num_heads, self.head_dim)
+        k = k.view(batch_size, seq_len, self.num_heads, self.head_dim)
+        v = v.view(batch_size, seq_len, self.num_heads, self.head_dim)
+
+        # Apply feature map for linear attention
+        q = self._feature_map(q)  # [B, S, H, D_h]
+        k = self._feature_map(k)  # [B, S, H, D_h]
+
+        # Linear attention with causality via cumsum
+        # kv_cumsum[t] = sum_{i<=t} k[i] @ v[i].T
+        # This is equivalent to causal attention but O(n)
+
+        # Compute K^T V cumulatively for causality
+        # k: [B, S, H, D_h], v: [B, S, H, D_h]
+        # kv: [B, S, H, D_h, D_h] but we compute efficiently
+        kv = torch.einsum('bshd,bshe->bshde', k, v)  # [B, S, H, D_h, D_h]
+        kv_cumsum = torch.cumsum(kv, dim=1)  # Causal: only see past
+
+        # k_cumsum for normalization
+        k_cumsum = torch.cumsum(k, dim=1)  # [B, S, H, D_h]
+
+        # Compute attention output
+        # out[t] = q[t] @ kv_cumsum[t] / (q[t] @ k_cumsum[t])
+        numerator = torch.einsum('bshd,bshde->bshe', q, kv_cumsum)  # [B, S, H, D_h]
+        denominator = torch.einsum('bshd,bshd->bsh', q, k_cumsum).unsqueeze(-1)  # [B, S, H, 1]
+
+        # Numerical stability
+        output = numerator / (denominator + 1e-6)  # [B, S, H, D_h]
+
+        # Reshape back
+        output = output.contiguous().view(batch_size, seq_len, self.latent_dim)
+        output = self.out_proj(output)
+        output = self.dropout(output)
+
+        # Gated residual connection
+        gate_input = torch.cat([x, output], dim=-1)
+        gate = torch.sigmoid(self.gate(gate_input))
+
+        return x + gate * (output - x)
+
+
 class GlobalHaltingUnit(nn.Module):
     """Global halting mechanism for sequence-level stopping.
 
@@ -178,6 +276,159 @@ class GlobalHaltingUnit(nn.Module):
         return combined
 
 
+class EnhancedGlobalHaltingUnit(nn.Module):
+    """Enhanced global halting with learnable weights and attention pooling.
+
+    Improvements over basic GlobalHaltingUnit:
+    1. Learnable global weight (log-sigmoid parameterization)
+    2. Attention pooling instead of mean pooling
+    3. Convergence confidence bonus based on state stability
+
+    Based on academic review feedback about fixed weights and simple pooling.
+    """
+
+    def __init__(
+        self,
+        latent_dim: int,
+        init_global_weight: float = 0.3,
+        use_attention_pool: bool = True,
+        use_convergence_bonus: bool = True,
+    ):
+        super().__init__()
+        self.latent_dim = latent_dim
+        self.use_attention_pool = use_attention_pool
+        self.use_convergence_bonus = use_convergence_bonus
+
+        # Learnable global weight via log-sigmoid parameterization
+        # global_weight = sigmoid(log_global_weight)
+        # Initialize to achieve init_global_weight
+        init_logit = torch.log(torch.tensor(init_global_weight / (1 - init_global_weight + 1e-8)))
+        self.log_global_weight = nn.Parameter(init_logit)
+
+        # Attention pooling
+        if use_attention_pool:
+            self.pool_query = nn.Parameter(torch.randn(1, 1, latent_dim) * 0.02)
+            self.pool_key = nn.Linear(latent_dim, latent_dim, bias=False)
+            self.pool_value = nn.Linear(latent_dim, latent_dim, bias=False)
+        else:
+            self.pool_query = None
+            self.pool_key = None
+            self.pool_value = None
+
+        # Global halt projection
+        self.global_proj = nn.Sequential(
+            nn.Linear(latent_dim, latent_dim // 2),
+            nn.ReLU(),
+            nn.Linear(latent_dim // 2, 1),
+        )
+
+        # Convergence estimator (compares current to input)
+        if use_convergence_bonus:
+            self.convergence_proj = nn.Sequential(
+                nn.Linear(latent_dim * 2, latent_dim // 2),
+                nn.ReLU(),
+                nn.Linear(latent_dim // 2, 1),
+                nn.Sigmoid(),
+            )
+        else:
+            self.convergence_proj = None
+
+        # Store previous state for convergence estimation
+        self._prev_state = None
+
+    @property
+    def global_weight(self) -> torch.Tensor:
+        """Get current global weight (clamped to [0.01, 0.99])."""
+        return torch.sigmoid(self.log_global_weight).clamp(0.01, 0.99)
+
+    def _attention_pool(
+        self,
+        state: torch.Tensor,
+        attention_mask: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
+        """Attention-based pooling over sequence positions."""
+        batch_size, seq_len, _ = state.shape
+
+        # Query: learned global query
+        query = self.pool_query.expand(batch_size, 1, -1)  # [B, 1, D]
+
+        # Key and Value from state
+        key = self.pool_key(state)    # [B, S, D]
+        value = self.pool_value(state)  # [B, S, D]
+
+        # Attention scores
+        scores = torch.matmul(query, key.transpose(-2, -1))  # [B, 1, S]
+        scores = scores / (self.latent_dim ** 0.5)
+
+        # Apply mask
+        if attention_mask is not None:
+            mask = attention_mask.unsqueeze(1)  # [B, 1, S]
+            scores = scores.masked_fill(mask == 0, float('-inf'))
+
+        # Softmax and weighted sum
+        attn_weights = F.softmax(scores, dim=-1)  # [B, 1, S]
+        pooled = torch.matmul(attn_weights, value)  # [B, 1, D]
+
+        return pooled.squeeze(1)  # [B, D]
+
+    def forward(
+        self,
+        state: torch.Tensor,
+        local_halt: torch.Tensor,
+        attention_mask: Optional[torch.Tensor] = None,
+        input_state: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
+        """
+        Compute combined halt probability with enhancements.
+
+        Args:
+            state: Current state [B, S, D]
+            local_halt: Per-position halt probabilities [B, S]
+            attention_mask: Mask for valid positions [B, S]
+            input_state: Original input for convergence estimation [B, S, D]
+
+        Returns:
+            Combined halt probabilities [B, S]
+        """
+        # Pool sequence to global representation
+        if self.use_attention_pool and self.pool_query is not None:
+            pooled = self._attention_pool(state, attention_mask)
+        else:
+            # Fallback to mean pooling
+            if attention_mask is not None:
+                mask = attention_mask.unsqueeze(-1).float()
+                pooled = (state * mask).sum(dim=1) / mask.sum(dim=1).clamp(min=1)
+            else:
+                pooled = state.mean(dim=1)
+
+        # Global halt probability
+        global_halt = torch.sigmoid(self.global_proj(pooled))  # [B, 1]
+
+        # Convergence bonus: increase halt probability if state has converged
+        if self.use_convergence_bonus and self.convergence_proj is not None and input_state is not None:
+            # Compare current pooled state to input pooled state
+            if attention_mask is not None:
+                mask = attention_mask.unsqueeze(-1).float()
+                input_pooled = (input_state * mask).sum(dim=1) / mask.sum(dim=1).clamp(min=1)
+            else:
+                input_pooled = input_state.mean(dim=1)
+
+            # Concatenate current and input for convergence estimation
+            convergence_input = torch.cat([pooled, input_pooled], dim=-1)
+            convergence_confidence = self.convergence_proj(convergence_input)  # [B, 1]
+
+            # Boost global halt if converged (multiplicative bonus)
+            global_halt = global_halt + convergence_confidence * (1 - global_halt) * 0.2
+
+        # Get learnable global weight
+        gw = self.global_weight
+
+        # Combine local and global
+        combined = (1 - gw) * local_halt + gw * global_halt
+
+        return combined
+
+
 class LatentReasoningUnit(nn.Module):
     """Latent Reasoning Unit with GRU gating and ACT halting.
 
@@ -193,6 +444,8 @@ class LatentReasoningUnit(nn.Module):
         config: LRUConfig with hyperparameters
         use_positional_mixing: Whether to enable cross-position interaction
         use_global_halting: Whether to enable global halting
+        positional_mixing_type: 'conv' for convolution or 'attention' for linear attention
+        use_enhanced_global_halting: Whether to use enhanced global halting with learnable weights
     """
 
     def __init__(
@@ -200,6 +453,8 @@ class LatentReasoningUnit(nn.Module):
         config: LRUConfig,
         use_positional_mixing: bool = True,
         use_global_halting: bool = True,
+        positional_mixing_type: str = 'conv',  # 'conv' or 'attention'
+        use_enhanced_global_halting: bool = False,
     ):
         super().__init__()
         self.config = config
@@ -210,6 +465,8 @@ class LatentReasoningUnit(nn.Module):
         self.gradient_checkpointing = config.gradient_checkpointing
         self.use_positional_mixing = use_positional_mixing
         self.use_global_halting = use_global_halting
+        self.positional_mixing_type = positional_mixing_type
+        self.use_enhanced_global_halting = use_enhanced_global_halting
 
         # GRU-style gates
         # Input: concatenation of [current_state, original_input]
@@ -223,22 +480,43 @@ class LatentReasoningUnit(nn.Module):
         # Initialize halt bias to encourage more iterations initially
         nn.init.constant_(self.halt_proj.bias, config.init_halt_bias)
 
-        # Optional positional mixing (NEW)
+        # Optional positional mixing
+        # Choose between convolution-based (local) and attention-based (global)
         if use_positional_mixing:
-            self.pos_mixing = PositionalMixing(
-                latent_dim=self.latent_dim,
-                kernel_size=3,
-                causal=True,
-            )
+            # Get type from config if available, otherwise use parameter
+            mixing_type = getattr(config, 'positional_mixing_type', positional_mixing_type)
+            if mixing_type == 'attention':
+                self.pos_mixing = AttentionPositionalMixing(
+                    latent_dim=self.latent_dim,
+                    num_heads=1,
+                    dropout=0.0,
+                )
+            else:  # 'conv' (default)
+                self.pos_mixing = PositionalMixing(
+                    latent_dim=self.latent_dim,
+                    kernel_size=3,
+                    causal=True,
+                )
         else:
             self.pos_mixing = None
 
-        # Optional global halting (NEW)
+        # Optional global halting
+        # Choose between basic and enhanced version
         if use_global_halting:
-            self.global_halt = GlobalHaltingUnit(
-                latent_dim=self.latent_dim,
-                global_weight=0.3,
-            )
+            # Get type from config if available
+            use_enhanced = getattr(config, 'use_enhanced_global_halting', use_enhanced_global_halting)
+            if use_enhanced:
+                self.global_halt = EnhancedGlobalHaltingUnit(
+                    latent_dim=self.latent_dim,
+                    init_global_weight=0.3,
+                    use_attention_pool=True,
+                    use_convergence_bonus=True,
+                )
+            else:
+                self.global_halt = GlobalHaltingUnit(
+                    latent_dim=self.latent_dim,
+                    global_weight=0.3,
+                )
         else:
             self.global_halt = None
 

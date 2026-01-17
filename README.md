@@ -6,10 +6,22 @@ ZeroModel 是一个基于 DeepSeek-V3 的 MLA（多头潜在注意力）架构�
 
 ## 核心创新
 
+### 基础架构
+
 1. **MLA (Multi-head Latent Attention)**: 在注意力机制中引入 KV 压缩潜空间
 2. **LRU (Latent Reasoning Unit)**: 在潜空间中进行递归推理，使用 GRU 风格门控
 3. **ACT (Adaptive Computation Time)**: 自适应停机机制，根据问题复杂度动态调整计算量
 4. **Decoupled RoPE**: 解耦位置编码，只对部分 head 维度应用 RoPE
+
+### 科学性改进 (v2.0)
+
+基于学术评审反馈，新增以下改进：
+
+5. **注意力式位置混合**: 使用 O(n) 线性注意力替代 3-token 卷积窗口，实现全局跨位置交互
+6. **增强全局停机机制**: 可学习全局权重 + 注意力池化 + 收敛置信度奖励
+7. **可学习损失权重**: Log-softplus 参数化，自动适应训练动态
+8. **顺序规则应用**: 支持真正的多步推理测试（规则读取更新后的状态）
+9. **轨迹验证奖励**: 验证中间推理步骤，惩罚错误推理过程
 
 ## 架构图
 
@@ -168,7 +180,7 @@ zeromodel/
 │   │   │   ├── losses.py               # 损失函数
 │   │   │   └── halting.py              # 停机单元
 │   │   └── config/
-│   │       └── lru_trainer.yaml        # 训练配置 (含17个消融实验)
+│   │       └── lru_trainer.yaml        # 训练配置 (含23个消融实验)
 │   └── utils/
 │       ├── param_counter.py            # 参数计数工具
 │       ├── statistical_tests.py        # 统计显著性检验
@@ -204,14 +216,24 @@ zeromodel/
 ### 数据生成
 
 ```bash
-# 生成 100K 样本数据集
+# 生成 100K 样本数据集（同时规则应用）
 python examples/data_preprocess/causal_loop.py \
     --local_dir ~/data/causal_loop \
     --num_samples 100000 \
     --levels 1,2,3,4
+
+# v2.0: 顺序规则应用 + 轨迹记录（测试真正的多步推理）
+python examples/data_preprocess/causal_loop.py \
+    --local_dir ~/data/causal_loop_sequential \
+    --num_samples 100000 \
+    --levels 1,2,3,4 \
+    --sequential \
+    --include_trajectory
 ```
 
 数据生成速度约 150K 样本/秒。
+
+**顺序模式** (v2.0): 使用 `--sequential` 时，规则按顺序应用并读取更新后的状态，真正测试多步推理能力（而非同时应用规则的"记忆"能力）。`--include_trajectory` 会保存完整的中间状态序列，用于轨迹验证奖励。
 
 ## 训练
 
@@ -250,12 +272,14 @@ bash scripts/train_lru.sh
 
 ## 损失函数
 
-| 损失 | 权重 | 作用 |
-|------|------|------|
+| 损失 | 默认权重 | 作用 |
+|------|----------|------|
 | L_pred | 1.0 | 下一 token 预测（主目标）|
-| L_stability | 0.1 | 表示收敛性（迭代后残差递减）|
+| L_stability | 0.05 | 表示收敛性（迭代后残差递减）|
 | L_sparsity | 0.01 | 激活稀疏性（Hoyer-Square）|
-| L_ponder | 0.001 | 计算代价惩罚（ACT 风格）|
+| L_ponder | 0.01 | 计算代价惩罚（ACT 风格）|
+
+**可学习损失权重** (v2.0): 支持 `use_learnable_weights: true` 选项，使用 log-softplus 参数化自动学习最优权重比例，解决"魔法数字"问题。
 
 ## 测试
 
@@ -291,19 +315,38 @@ output, attn_weights, past_kv = mla(hidden_states, position_ids=position_ids)
 ```python
 from verl.models.mla import LRUConfig, LatentReasoningUnit
 
+# 基础配置
 lru_config = LRUConfig(
     latent_dim=512,
-    max_iterations=8,
-    halt_threshold=0.99,
+    max_iterations=16,           # 推荐 16 (v2.0)
+    halt_threshold=0.95,         # 推荐 0.95 (v2.0)
+)
+lru = LatentReasoningUnit(lru_config)
+
+# 高级配置 (v2.0): 注意力混合 + 增强停机
+lru_config_v2 = LRUConfig(
+    latent_dim=512,
+    max_iterations=16,
+    halt_threshold=0.95,
+    positional_mixing_type='attention',    # 全局跨位置交互
+    use_enhanced_global_halting=True,      # 增强停机机制
+    use_learnable_loss_weights=True,       # 可学习损失权重
+)
+lru_v2 = LatentReasoningUnit(
+    lru_config_v2,
+    use_positional_mixing=True,
+    use_global_halting=True,
+    positional_mixing_type='attention',
+    use_enhanced_global_halting=True,
 )
 
-lru = LatentReasoningUnit(lru_config)
 refined_latent, lru_output = lru(latent_kv)
 
 # lru_output 包含:
 # - halt_probs: 每步停机概率
 # - ponder_cost: 计算代价
 # - num_iterations: 实际迭代次数
+# - convergence_bonus: 收敛置信度奖励 (增强模式)
 ```
 
 ### 完整模型
@@ -325,10 +368,16 @@ outputs = model(input_ids, labels=labels)
 
 ## 评估指标
 
+### 基础指标
 - **准确率 vs 难度级别**: 不同任务难度下的表现
 - **Few-shot 效率**: 示范数量与性能的关系
 - **平均迭代次数 vs 问题复杂度**: 验证自适应计算
 - **收敛比**: 最后/首次残差，验证推理收敛性
+
+### 扩展指标 (v2.0)
+- **中间步骤准确率**: 验证推理过程正确性（`compute_intermediate_step_accuracy`）
+- **迭代-复杂度相关性**: 验证自适应计算与问题复杂度相关（`compute_iteration_complexity_correlation`）
+- **收敛质量**: 残差比和稳定性评估（`compute_convergence_quality`）
 
 ## 消融实验工具
 
@@ -346,6 +395,7 @@ scripts/
 └── run_ablation.py         # 自动化消融实验脚本
 
 tests/
+├── test_mla_lru.py             # MLA+LRU 测试 (13 tests)
 ├── test_param_counter.py       # 参数计数测试 (16 tests)
 ├── test_statistical_tests.py   # 统计检验测试 (32 tests)
 └── test_evaluation_metrics.py  # 评估指标测试 (18 tests)
@@ -582,7 +632,7 @@ python scripts/run_ablation.py \
 
 ### 5. 预定义实验配置
 
-`verl/trainer/config/lru_trainer.yaml` 包含 17 个预定义实验：
+`verl/trainer/config/lru_trainer.yaml` 包含 **23 个**预定义实验：
 
 | 类别 | 实验名 | 说明 |
 |------|--------|------|
@@ -600,6 +650,11 @@ python scripts/run_ablation.py \
 | | `mla_lru_no_ponder` | 无 ponder 损失 |
 | | `mla_lru_high_ponder` | 高 ponder 权重 (0.01) |
 | | `mla_lru_ce_only` | 仅交叉熵损失 |
+| **科学改进 (v2.0)** | `sequential_causal` | 顺序规则应用 + 轨迹验证 |
+| | `attention_mixing_ablation` | 注意力 vs 卷积位置混合 |
+| | `learnable_weights` | 可学习 vs 固定损失权重 |
+| | `enhanced_global_halting` | 增强全局停机机制 |
+| | `full_scientific` | 所有科学改进组合 (**推荐**) |
 
 ### 6. 运行测试
 
@@ -620,6 +675,35 @@ python -m pytest tests/test_param_counter.py tests/test_statistical_tests.py tes
 3. **多重比较校正**: 明确使用的校正方法（推荐 Holm）
 4. **难度曲线图**: 展示 accuracy vs difficulty level
 5. **效率分析**: 报告 speedup、convergence ratio、ponder cost
+
+## 版本历史
+
+### v2.0 (科学性改进)
+
+基于学术评审反馈的系统性重构：
+
+**架构改进**
+- 注意力式位置混合：O(n) 线性注意力替代 3-token 卷积
+- 增强全局停机机制：可学习权重 + 注意力池化 + 收敛置信度
+- 可学习损失权重：log-softplus 参数化
+
+**任务改进**
+- 顺序规则应用模式：测试真正的多步推理
+- 轨迹验证奖励：惩罚错误推理过程
+
+**评估改进**
+- 新增 3 个评估指标函数
+- 5 个新消融实验配置
+- 4 个新单元测试
+
+### v1.0 (初始版本)
+
+- MLA + LRU 核心架构
+- 因果环路预测任务
+- 17 个消融实验配置
+- 完整工具链（参数计数、统计检验、评估指标）
+
+---
 
 ## 致谢
 
