@@ -14,7 +14,6 @@ on:
       - "tests/test_evaluation_metrics.py"
       - ".github/workflows/ablation_tools.yml"
       - ".python-version"
-      - "pyproject.toml"
   pull_request:
     branches:
       - main
@@ -28,7 +27,6 @@ on:
       - "tests/test_evaluation_metrics.py"
       - ".github/workflows/ablation_tools.yml"
       - ".python-version"
-      - "pyproject.toml"
 
 jobs:
   test-ablation-tools:
@@ -48,38 +46,40 @@ jobs:
       - name: Set up Python ${{ matrix.python-version }}
         run: uv python install ${{ matrix.python-version }}
 
-      - name: Install dependencies
+      - name: Create venv and install lightweight dependencies
         run: |
-          uv venv --python ${{ matrix.python-version }}
-          uv pip install numpy pytest pyyaml
+          uv venv --python ${{ matrix.python-version }} .venv
+          # Install only lightweight dependencies for ablation tools
+          # Do NOT install the full verl package (which requires torch, vllm, etc.)
+          uv pip install --python .venv/bin/python numpy pytest pyyaml
 
       - name: Run param_counter tests
         run: |
-          uv run pytest tests/test_param_counter.py -v
+          .venv/bin/python -m pytest tests/test_param_counter.py -v
 
       - name: Run statistical_tests tests
         run: |
-          uv run pytest tests/test_statistical_tests.py -v
+          .venv/bin/python -m pytest tests/test_statistical_tests.py -v
 
       - name: Run evaluation_metrics tests
         run: |
-          uv run pytest tests/test_evaluation_metrics.py -v
+          .venv/bin/python -m pytest tests/test_evaluation_metrics.py -v
 
       - name: Verify param_counter module runs
         run: |
-          uv run python verl/utils/param_counter.py
+          .venv/bin/python verl/utils/param_counter.py
 
       - name: Verify statistical_tests module runs
         run: |
-          uv run python verl/utils/statistical_tests.py
+          .venv/bin/python verl/utils/statistical_tests.py
 
       - name: Verify evaluation_metrics module runs
         run: |
-          uv run python verl/utils/evaluation_metrics.py
+          .venv/bin/python verl/utils/evaluation_metrics.py
 
       - name: Verify ablation runner dry-run
         run: |
-          uv run python scripts/run_ablation.py --dry-run --experiments baseline mla_only
+          .venv/bin/python scripts/run_ablation.py --dry-run --experiments baseline mla_only
 
   lint:
     runs-on: ubuntu-latest
@@ -94,11 +94,11 @@ jobs:
       - name: Set up Python
         run: uv python install 3.10
 
-      - name: Install linting tools
+      - name: Create venv and install linting tools
         run: |
-          uv venv --python 3.10
-          uv pip install flake8
+          uv venv --python 3.10 .venv
+          uv pip install --python .venv/bin/python flake8
 
       - name: Lint ablation tools
         run: |
-          uv run flake8 verl/utils/param_counter.py verl/utils/statistical_tests.py verl/utils/evaluation_metrics.py scripts/run_ablation.py --max-line-length=120 --ignore=E501,W503,W504,E203,E226,E741,F541
+          .venv/bin/flake8 verl/utils/param_counter.py verl/utils/statistical_tests.py verl/utils/evaluation_metrics.py scripts/run_ablation.py --max-line-length=120 --ignore=E501,W503,W504,E203,E226,E741,F541
