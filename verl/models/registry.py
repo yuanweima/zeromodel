@@ -38,7 +38,8 @@ _MODELS = {
     "LlamaForCausalLM":
         ("llama", ("ParallelLlamaForCausalLMRmPadPP", "ParallelLlamaForValueRmPadPP", "ParallelLlamaForCausalLMRmPad")),
     "MistralForCausalLM": ("mistral", ("ParallelMistralForCausalLMRmPadPP", "ParallelMistralForValueRmPadPP",
-                                       "ParallelMistralForCausalLMRmPad"))
+                                       "ParallelMistralForCausalLMRmPad")),
+    "DeepSeekMLAForCausalLM": ("mla", ("DeepSeekMLAForCausalLM", "DeepSeekMLAForCausalLM", "DeepSeekMLAForCausalLM")),
 }
 
 

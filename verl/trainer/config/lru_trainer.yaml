@@ -1,0 +1,188 @@
+# LRU Trainer Configuration
+# Configuration for training MLA + LRU model on causal loop task
+
+# Data Configuration
+data:
+  train_files: ~/data/causal_loop/train.parquet
+  val_files: ~/data/causal_loop/test.parquet
+  train_batch_size: 256
+  val_batch_size: 64
+  max_prompt_length: 512
+  max_response_length: 512
+  truncation_side: right
+
+# Model Configuration
+model:
+  # Base model to adapt (Qwen-0.5B for fast iteration)
+  base_model: Qwen/Qwen2.5-0.5B
+
+  # MLA Configuration
+  mla:
+    kv_latent_dim: 256
+    q_latent_dim: 512
+    rope_head_dim: 64
+    attention_dropout: 0.0
+    attention_bias: false
+
+  # LRU Configuration
+  lru:
+    enabled: true
+    max_iterations: 8
+    halt_threshold: 0.99
+    init_halt_bias: -2.0
+    use_layer_norm: true
+    gradient_checkpointing: true
+    # Which layers to apply LRU (null = all)
+    layers: null
+
+# Training Configuration
+training:
+  # Optimizer
+  optimizer: adamw
+  learning_rate: 1.0e-5
+  weight_decay: 0.01
+  adam_beta1: 0.9
+  adam_beta2: 0.999
+  adam_epsilon: 1.0e-8
+  max_grad_norm: 1.0
+
+  # Schedule
+  warmup_steps: 100
+  total_training_steps: 10000
+  lr_scheduler_type: cosine
+
+  # Precision
+  bf16: true
+  fp16: false
+
+  # Gradient accumulation
+  gradient_accumulation_steps: 4
+
+  # Checkpointing
+  save_steps: 500
+  save_total_limit: 3
+  output_dir: ./outputs/lru_causal_loop
+
+# LRU Loss Configuration
+lru_loss:
+  stability_weight: 0.1
+  sparsity_weight: 0.01
+  ponder_weight: 0.001
+  stability_decay: 0.9
+  sparsity_target: 0.8
+  warmup_steps: 200
+  weight_schedule: linear  # constant, linear, cosine
+
+# PPO Configuration (for RL fine-tuning)
+ppo:
+  # Actor-Critic
+  actor_lr: 1.0e-6
+  critic_lr: 1.0e-5
+
+  # PPO hyperparameters
+  ppo_epochs: 4
+  clip_ratio: 0.2
+  value_loss_coef: 0.5
+  entropy_coef: 0.01
+
+  # GAE
+  gamma: 0.99
+  gae_lambda: 0.95
+
+  # KL control
+  kl_coef: 0.1
+  kl_target: 0.02
+
+  # Rollout
+  rollout_batch_size: 128
+  max_new_tokens: 256
+  temperature: 0.7
+  top_p: 0.95
+
+# Reward Configuration
+reward:
+  style: rule
+  reward_module: verl.utils.reward_score.causal_loop
+  # Reward scaling
+  correct_reward: 1.0
+  partial_reward_base: 0.3
+  format_reward: 0.1
+
+# Evaluation Configuration
+evaluation:
+  eval_steps: 200
+  eval_batch_size: 64
+  # Metrics to track
+  metrics:
+    - accuracy_by_level
+    - avg_iterations
+    - convergence_ratio
+    - ponder_cost
+
+# Distributed Training
+distributed:
+  # FSDP
+  fsdp_enabled: true
+  fsdp_sharding_strategy: FULL_SHARD
+  fsdp_offload_params: false
+  fsdp_offload_optimizer: false
+
+  # Data parallel
+  world_size: 1  # Set via command line
+
+  # Sequence parallel (for long sequences)
+  ulysses_sequence_parallel_size: 1
+
+# Logging
+logging:
+  log_level: INFO
+  log_steps: 10
+  wandb:
+    enabled: true
+    project: zeromodel
+    name: lru_causal_loop
+    tags:
+      - mla
+      - lru
+      - causal_loop
+
+# Experiment Groups Configuration
+# For ablation studies
+experiments:
+  # Group A: Baseline (no MLA, no LRU)
+  baseline:
+    model:
+      mla:
+        enabled: false
+      lru:
+        enabled: false
+    description: "Baseline Qwen-0.5B without MLA/LRU"
+
+  # Group B: MLA only (no LRU)
+  mla_only:
+    model:
+      mla:
+        enabled: true
+      lru:
+        enabled: false
+    description: "MLA attention without LRU reasoning"
+
+  # Group C: MLA + LRU (fixed iterations)
+  mla_lru_fixed:
+    model:
+      mla:
+        enabled: true
+      lru:
+        enabled: true
+        halt_threshold: 1.0  # Never halt early = fixed iterations
+    description: "MLA + LRU with fixed 8 iterations"
+
+  # Group D: MLA + LRU (adaptive halting)
+  mla_lru_adaptive:
+    model:
+      mla:
+        enabled: true
+      lru:
+        enabled: true
+        halt_threshold: 0.99
+    description: "MLA + LRU with ACT adaptive halting"
