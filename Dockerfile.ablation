@@ -1,0 +1,75 @@
+# Copyright 2024 ZeroModel Authors
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# =============================================================================
+# ZeroModel Ablation Tools Dockerfile (Lightweight, No GPU Required)
+# =============================================================================
+# This Dockerfile builds a lightweight environment for:
+# - Running ablation study tools
+# - Parameter counting and comparison
+# - Statistical analysis
+# - Evaluation metrics computation
+# - Running tests
+#
+# Usage:
+#   docker build -f Dockerfile.ablation -t zeromodel-ablation:latest .
+#   docker run -it zeromodel-ablation:latest
+#   docker run zeromodel-ablation:latest pytest tests/ -v
+# =============================================================================
+
+FROM python:3.10-slim
+
+# Set environment variables
+ENV PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PIP_NO_CACHE_DIR=1 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1
+
+# Set working directory
+WORKDIR /workspace/zeromodel
+
+# Install system dependencies
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    git \
+    && rm -rf /var/lib/apt/lists/*
+
+# Create requirements file for ablation tools
+RUN echo "numpy>=1.21.0\npytest>=7.0.0\npyyaml>=6.0" > /tmp/requirements-ablation.txt
+
+# Install Python dependencies
+RUN pip install --upgrade pip && \
+    pip install -r /tmp/requirements-ablation.txt
+
+# Copy only the necessary files for ablation tools
+COPY verl/utils/param_counter.py verl/utils/param_counter.py
+COPY verl/utils/statistical_tests.py verl/utils/statistical_tests.py
+COPY verl/utils/evaluation_metrics.py verl/utils/evaluation_metrics.py
+COPY verl/trainer/config/ verl/trainer/config/
+COPY scripts/run_ablation.py scripts/run_ablation.py
+COPY tests/test_param_counter.py tests/test_param_counter.py
+COPY tests/test_statistical_tests.py tests/test_statistical_tests.py
+COPY tests/test_evaluation_metrics.py tests/test_evaluation_metrics.py
+
+# Create __init__.py files for proper Python package structure
+RUN mkdir -p verl/utils && \
+    touch verl/__init__.py && \
+    touch verl/utils/__init__.py && \
+    mkdir -p verl/trainer && \
+    touch verl/trainer/__init__.py
+
+# Set PYTHONPATH
+ENV PYTHONPATH=/workspace/zeromodel
+
+# Default command: run tests
+CMD ["pytest", "tests/", "-v"]

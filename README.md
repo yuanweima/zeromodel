@@ -43,6 +43,59 @@ ZeroModel 是一个基于 DeepSeek-V3 的 MLA（多头潜在注意力）架构�
 
 详见 [INSTALL.md](INSTALL.md)
 
+### Docker 安装（推荐）
+
+本项目提供两种 Docker 镜像：
+
+**1. 完整版（GPU 训练环境）**
+
+```bash
+# 构建镜像
+docker build -t zeromodel:latest .
+
+# 启动容器（需要 NVIDIA GPU）
+docker run --gpus all -it \
+    -v ~/.cache/huggingface:/root/.cache/huggingface \
+    -v $(pwd)/data:/workspace/zeromodel/data \
+    zeromodel:latest
+
+# 或使用 docker-compose
+docker compose up zeromodel
+```
+
+**2. 轻量版（消融实验工具，无需 GPU）**
+
+```bash
+# 构建轻量镜像
+docker build -f Dockerfile.ablation -t zeromodel-ablation:latest .
+
+# 运行测试
+docker run zeromodel-ablation:latest pytest tests/ -v
+
+# 运行参数计数
+docker run zeromodel-ablation:latest python verl/utils/param_counter.py
+
+# 运行消融实验（dry-run）
+docker run zeromodel-ablation:latest python scripts/run_ablation.py --dry-run
+
+# 或使用 docker-compose
+docker compose run ablation-test      # 运行测试
+docker compose run param-counter      # 参数计数
+docker compose run ablation-run       # 消融实验 dry-run
+```
+
+**Docker Compose 服务一览**
+
+| 服务 | 用途 | GPU |
+|------|------|-----|
+| `zeromodel` | 完整训练环境 | ✅ |
+| `ablation` | 消融工具交互环境 | ❌ |
+| `ablation-test` | 运行测试套件 | ❌ |
+| `ablation-run` | 消融实验 dry-run | ❌ |
+| `param-counter` | 参数计数工具 | ❌ |
+
+### 本地安装
+
 快速安装:
 
 ```bash

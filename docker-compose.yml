@@ -1,0 +1,104 @@
+# Copyright 2024 ZeroModel Authors
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# =============================================================================
+# ZeroModel Docker Compose Configuration
+# =============================================================================
+# Usage:
+#   Full environment (GPU): docker compose up zeromodel
+#   Ablation tools only:    docker compose up ablation
+#   Run tests:              docker compose run ablation-test
+# =============================================================================
+
+version: '3.8'
+
+services:
+  # Full ZeroModel environment with GPU support
+  zeromodel:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: zeromodel:latest
+    container_name: zeromodel
+    runtime: nvidia
+    environment:
+      - NVIDIA_VISIBLE_DEVICES=all
+      - CUDA_VISIBLE_DEVICES=0
+    volumes:
+      - .:/workspace/zeromodel
+      - ~/.cache/huggingface:/root/.cache/huggingface
+    working_dir: /workspace/zeromodel
+    stdin_open: true
+    tty: true
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+
+  # Lightweight ablation tools environment (no GPU required)
+  ablation:
+    build:
+      context: .
+      dockerfile: Dockerfile.ablation
+    image: zeromodel-ablation:latest
+    container_name: zeromodel-ablation
+    volumes:
+      - ./verl/utils:/workspace/zeromodel/verl/utils
+      - ./verl/trainer/config:/workspace/zeromodel/verl/trainer/config
+      - ./scripts:/workspace/zeromodel/scripts
+      - ./tests:/workspace/zeromodel/tests
+      - ./results:/workspace/zeromodel/results
+    working_dir: /workspace/zeromodel
+    stdin_open: true
+    tty: true
+
+  # Run ablation tests
+  ablation-test:
+    build:
+      context: .
+      dockerfile: Dockerfile.ablation
+    image: zeromodel-ablation:latest
+    volumes:
+      - ./verl/utils:/workspace/zeromodel/verl/utils
+      - ./tests:/workspace/zeromodel/tests
+    working_dir: /workspace/zeromodel
+    command: ["pytest", "tests/", "-v", "--tb=short"]
+
+  # Run ablation experiments (dry-run by default)
+  ablation-run:
+    build:
+      context: .
+      dockerfile: Dockerfile.ablation
+    image: zeromodel-ablation:latest
+    volumes:
+      - ./verl/utils:/workspace/zeromodel/verl/utils
+      - ./verl/trainer/config:/workspace/zeromodel/verl/trainer/config
+      - ./scripts:/workspace/zeromodel/scripts
+      - ./results:/workspace/zeromodel/results
+    working_dir: /workspace/zeromodel
+    command: ["python", "scripts/run_ablation.py", "--dry-run", "--experiments", "baseline", "mla_only", "mla_lru"]
+
+  # Parameter counting utility
+  param-counter:
+    build:
+      context: .
+      dockerfile: Dockerfile.ablation
+    image: zeromodel-ablation:latest
+    volumes:
+      - ./verl/utils:/workspace/zeromodel/verl/utils
+    working_dir: /workspace/zeromodel
+    command: ["python", "verl/utils/param_counter.py"]
