@@ -13,7 +13,7 @@
 # limitations under the License.
 
 # =============================================================================
-# ZeroModel Ablation Tools Dockerfile (Lightweight, No GPU Required)
+# ZeroModel Ablation Tools Dockerfile (Lightweight, using uv)
 # =============================================================================
 # This Dockerfile builds a lightweight environment for:
 # - Running ablation study tools
@@ -28,13 +28,14 @@
 #   docker run zeromodel-ablation:latest pytest tests/ -v
 # =============================================================================
 
-FROM python:3.10-slim
+# Use official Python image with uv pre-installed
+FROM ghcr.io/astral-sh/uv:python3.10-bookworm-slim
 
 # Set environment variables
 ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
-    PIP_NO_CACHE_DIR=1 \
-    PIP_DISABLE_PIP_VERSION_CHECK=1
+    UV_SYSTEM_PYTHON=1 \
+    UV_COMPILE_BYTECODE=1
 
 # Set working directory
 WORKDIR /workspace/zeromodel
@@ -44,12 +45,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     git \
     && rm -rf /var/lib/apt/lists/*
 
-# Create requirements file for ablation tools
-RUN echo "numpy>=1.21.0\npytest>=7.0.0\npyyaml>=6.0" > /tmp/requirements-ablation.txt
-
-# Install Python dependencies
-RUN pip install --upgrade pip && \
-    pip install -r /tmp/requirements-ablation.txt
+# Install Python dependencies using uv
+RUN uv pip install --system numpy>=1.21.0 pytest>=7.0.0 pyyaml>=6.0
 
 # Copy only the necessary files for ablation tools
 COPY verl/utils/param_counter.py verl/utils/param_counter.py

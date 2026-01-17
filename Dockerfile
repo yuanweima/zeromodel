@@ -13,7 +13,7 @@
 # limitations under the License.
 
 # =============================================================================
-# ZeroModel Full Dockerfile with GPU Support
+# ZeroModel Full Dockerfile with GPU Support (using uv)
 # =============================================================================
 # This Dockerfile builds the complete ZeroModel environment including:
 # - PyTorch with CUDA support
@@ -33,35 +33,38 @@ FROM nvcr.io/nvidia/pytorch:24.01-py3
 # Set environment variables
 ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
-    PIP_NO_CACHE_DIR=1 \
-    PIP_DISABLE_PIP_VERSION_CHECK=1
+    UV_SYSTEM_PYTHON=1 \
+    UV_COMPILE_BYTECODE=1
 
 # Set working directory
 WORKDIR /workspace/zeromodel
 
-# Install system dependencies
+# Install system dependencies and uv
 RUN apt-get update && apt-get install -y --no-install-recommends \
     git \
     curl \
     vim \
     htop \
-    && rm -rf /var/lib/apt/lists/*
+    && rm -rf /var/lib/apt/lists/* \
+    && curl -LsSf https://astral.sh/uv/install.sh | sh
 
-# Copy requirements first for better caching
-COPY requirements.txt .
+# Add uv to PATH
+ENV PATH="/root/.local/bin:$PATH"
 
-# Install Python dependencies
+# Copy dependency files first for better caching
+COPY pyproject.toml requirements.txt .python-version ./
+
+# Install Python dependencies using uv
 # Note: flash-attn requires special installation with CUDA
-RUN pip install --upgrade pip && \
-    pip install ninja packaging && \
-    pip install flash-attn --no-build-isolation && \
-    pip install -r requirements.txt
+RUN uv pip install ninja packaging && \
+    uv pip install flash-attn --no-build-isolation && \
+    uv pip install -r requirements.txt
 
 # Copy the entire project
 COPY . .
 
-# Install the package in development mode
-RUN pip install -e ".[test]"
+# Install the package in development mode using uv
+RUN uv pip install -e ".[test]"
 
 # Set default command
 CMD ["/bin/bash"]

@@ -94,12 +94,44 @@ docker compose run ablation-run       # 消融实验 dry-run
 | `ablation-run` | 消融实验 dry-run | ❌ |
 | `param-counter` | 参数计数工具 | ❌ |
 
-### 本地安装
+### 本地安装（使用 uv，推荐）
 
-快速安装:
+本项目使用 [uv](https://docs.astral.sh/uv/) 管理 Python 版本和依赖。
 
 ```bash
-conda create -n zeromodel python=3.9
+# 安装 uv（如果尚未安装）
+curl -LsSf https://astral.sh/uv/install.sh | sh
+
+# 克隆项目
+git clone https://github.com/yuanweima/zeromodel.git
+cd zeromodel
+
+# uv 会自动读取 .python-version 文件并安装正确的 Python 版本
+# 创建虚拟环境并安装依赖
+uv venv
+source .venv/bin/activate  # Linux/macOS
+# .venv\Scripts\activate   # Windows
+
+# 安装 PyTorch (CUDA 12.1)
+uv pip install torch==2.4.0 --index-url https://download.pytorch.org/whl/cu121
+
+# 安装 Flash Attention 2（需要 CUDA）
+uv pip install ninja packaging
+uv pip install flash-attn --no-build-isolation
+
+# 安装项目及所有依赖
+uv pip install -e ".[test]"
+
+# 安装其他可选依赖
+uv pip install wandb IPython matplotlib
+```
+
+### 本地安装（使用 pip/conda）
+
+如果不使用 uv，也可以用传统方式安装：
+
+```bash
+conda create -n zeromodel python=3.10
 conda activate zeromodel
 
 # 安装 PyTorch (CUDA 12.1)
